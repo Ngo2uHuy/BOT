@@ -1,0 +1,12 @@
+node_modules/
+.env
+data/
+*.sqlite*
+*.log
+test-results/
+playwright-report/
+dist/
+.desktop-build/
+.electron-cache/
+.npm-cache/
+.desktop-test/

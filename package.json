@@ -1,0 +1,28 @@
+{
+  "name": "facebook-group-telegram-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Theo dõi nhóm Facebook có quyền truy cập và gửi thông báo Telegram",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "login": "node --env-file-if-exists=.env src/login.js",
+    "test": "node --test",
+    "benchmark": "node scripts/benchmark-store.js",
+    "desktop": "node scripts/desktop.js",
+    "desktop:pack": "node scripts/package-desktop.js",
+    "desktop:verify": "node scripts/verify-desktop.js",
+    "install-browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "grammy": "^1.38.0",
+    "playwright": "^1.56.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^44.7.0"
+  }
+}
