@@ -3,8 +3,9 @@ import path from 'node:path';
 import { readConfig } from './config.js';
 import { Store } from './store.js';
 import { FacebookCollector } from './facebook.js';
-import { createBot, registerCommands } from './bot.js';
+import { createBot, prepareBot } from './bot.js';
 import { Monitor, safeError } from './monitor.js';
+import { commenterBlockWaits } from './commenter-block.js';
 import { ShopeeAffiliate } from './affiliate.js';
 import { TikTokAffiliate } from './tiktok-affiliate.js';
 
@@ -20,6 +21,11 @@ async function acquireLock(dataDir) {
     if (error.code !== 'EEXIST') throw error;
     const pid = Number(await readFile(filename,'utf8'));
     if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('monitor.lock không hợp lệ. Kiểm tra tiến trình bot trước khi xóa file khóa.');
+    // A container restarts the bot with the same PID (1), so a lock naming our own PID is stale.
+    if (pid === process.pid) {
+      await unlink(filename);
+      return acquireLock(dataDir);
+    }
     try { process.kill(pid,0); }
     catch (probe) {
       if (probe.code === 'ESRCH') {
@@ -48,20 +54,20 @@ async function main() {
   process.once('SIGTERM',stop);
   try {
     store = new Store(path.join(config.dataDir,'monitor.sqlite'));
+    const startupDateCount = store.initStartupDateRange(Date.now(),{all:false});
     collector = new FacebookCollector(config);
+    await collector.validateSessions(config.allowedUserIds);
     const tiktokAffiliate=new TikTokAffiliate(config.tiktokAffiliate);
-    bot = createBot({token:config.token,allowedUserIds:config.allowedUserIds,store,collector,affiliate:new ShopeeAffiliate(config.shopeeAffiliate),tiktokAffiliate});
-    await bot.init();
-    const webhook = await bot.api.getWebhookInfo();
-    if (webhook.url) throw new Error('Bot đang dùng webhook. Hãy dùng token bot riêng hoặc chủ động gỡ webhook trước khi chạy polling.');
-    await registerCommands(bot.api);
+    bot = createBot({token:config.token,allowedUserIds:config.allowedUserIds,store,collector,affiliate:new ShopeeAffiliate(config.shopeeAffiliate),tiktokAffiliate,blockWaits:(ownerId,options)=>monitor ? monitor.commenterBlockWaits(ownerId,options) : commenterBlockWaits(store,ownerId,options),blockProgress:id=>monitor?.commenterBlockProgress(id) ?? null});
+    await prepareBot(bot);
     if (stopping) return;
     monitor = new Monitor({store,collector,api:bot.api,config,tiktokAffiliate});
     monitorRun = monitor.start();
     // Attach rejection handling immediately; a background failure stops the bot too.
     const failure = monitorRun.catch(error => { stop(); throw error; });
     console.log(`Bot @${bot.botInfo.username} đang chạy. Nhắn /whoami hoặc /help trong chat riêng.`);
-    console.log(`Chu kỳ tối thiểu: ${config.pollIntervalMs/1000}s/nhóm; độ trễ thực tế tăng khi thêm nhóm.`);
+    if (startupDateCount > 0) console.log(`Bộ lọc ngày: Đã đặt mốc từ thời điểm khởi động (${new Date().toLocaleString('vi-VN',{timeZone:'Asia/Ho_Chi_Minh'})}) đến tương lai cho ${startupDateCount} nguồn.`);
+    console.log(`Chế độ quét: ${config.scanMode}; chu kỳ mỗi nhóm ${config.scanMinIntervalMs/1000}–${config.scanMaxIntervalMs/1000}s tùy nhóm có bài mới hay không.`);
     await Promise.race([bot.start({allowed_updates:['message','callback_query']}),failure]);
   } finally {
     stop();

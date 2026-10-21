@@ -76,7 +76,7 @@ Desktop và bot Telegram **không chạy đồng thời trên cùng thư mục d
 - Dừng vận hành rồi đóng cửa sổ app; chờ tiến trình kết thúc.
 - Nguồn, bài, link affiliate và hàng đợi đã lưu được giữ lại khi mở app lần sau.
 - Khi mọi tiến trình đã đóng, sao lưu `.env` và toàn bộ thư mục dữ liệu, gồm `monitor.sqlite` và `profiles`.
-- Desktop không nhận/gửi tin Telegram. Hàng đợi thông báo Telegram được giữ để bot xử lý khi chạy lại với cùng dữ liệu.
+- Có `TELEGRAM_BOT_TOKEN`: bấm Bắt đầu thì desktop chạy luôn bot Telegram, dùng chung dữ liệu; thao tác bên nào cũng áp dụng cho bên kia. Không chạy thêm `npm start` hay bot cùng token ở nơi khác (Telegram báo 409). Không có token hoặc Telegram lỗi khi khởi động: desktop chạy cục bộ, hàng đợi thông báo Telegram được giữ để gửi sau.
 
 ## Lỗi thường gặp
 

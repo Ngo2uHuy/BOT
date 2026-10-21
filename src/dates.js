@@ -11,9 +11,12 @@ export function parseDay(value) {
   return utc - 7 * 3600000;
 }
 
-export function parseDateRange(value) {
+export function parseDateRange(value, now = Date.now()) {
   const parts = String(value).trim().split(/\s+/);
   if (parts.length === 1 && parts[0].toLowerCase() === 'off') return null;
+  if (parts.length === 1 && ['now', 'hientai', 'hien-tai'].includes(parts[0].toLowerCase())) {
+    return { start: now, end: null };
+  }
   const endpoint = () => {
     const day = parseDay(parts.shift());
     if (!parts[0]?.includes(':')) return { time: day, timed: false };
@@ -35,7 +38,13 @@ export function parseDateRange(value) {
 export function matchesDateRange(post, range, now = Date.now()) {
   if (!range) return true;
   const time = post.publishedAt ? Date.parse(post.publishedAt) : NaN;
-  return Number.isFinite(time) && time >= range.start && time <= now && (range.end === null || time < range.end);
+  return Number.isFinite(time) && time >= range.start && time <= now + 60000 && (range.end === null || time < range.end);
+}
+
+// Only a closed range is backfilled deeply; an open one (e.g. the startup range) is followed incrementally,
+// otherwise every history pass would page back to its start once it is a day old.
+export function isHistoricalDateRange(range) {
+  return Boolean(range) && range.end !== null;
 }
 
 export function formatDateRange(range) {

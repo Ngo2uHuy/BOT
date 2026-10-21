@@ -6,14 +6,19 @@ const group = { id: 1, label: "Nhóm nhà đất", url: "https://www.facebook.co
 const post = { url: "https://www.facebook.com/groups/123/posts/456/", text: "Cần mua đất Đà Nẵng <b>gấp</b>", author: "Nguyễn An", publishedAt: "2026-10-08T10:00:00Z", reactions: 12, comments: 0, shares: null };
 
 test("format includes text, permanent link and date and author profile without engagement", () => {
-  const text = formatPost(group, post, ["mua dat"]);
+  const text = formatPost(group, post, ["mua đất"]);
   assert.ok(text.includes(post.text));
   assert.ok(text.includes(post.url));
-  assert.ok(text.includes("Từ khóa: mua dat"));
+  assert.ok(text.includes("Từ khóa: mua đất"));
   assert.match(text, /Ngày đăng:.*8\/10\/2026/);
   assert.ok(text.includes('17:00:00'));
   assert.ok(text.includes('Trang cá nhân: không rõ'));
   assert.doesNotMatch(text, /Cảm xúc \(tổng\):|Bình luận:|Chia sẻ:/);
+});
+
+test('keyword labels preserve accents and ignore case just like the filter', () => {
+  assert.doesNotMatch(formatPost(group, {...post,text:'Ấn phẩm cơ bản'}, ['có bạn']), /Từ khóa:/);
+  assert.match(formatPost(group, {...post,text:'CÓ BẠN giúp không'}, ['có bạn']), /Từ khóa: có bạn/);
 });
 
 test("long content is explicitly shortened without losing link or exceeding Telegram limit", () => {

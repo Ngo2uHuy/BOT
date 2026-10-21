@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { FACEBOOK_COOLDOWN_MS } from '../src/facebook-cooldown.js';
+import { readJoinedGroupsApi } from '../src/joined-groups.js';
 import { FacebookCollector, engagementFromLabels, extractVisiblePostSnapshots, normalizeCount, normalizeFacebookGroupUrl, normalizePostUrl, normalizeSnapshots, profileDirectory, revealPermalinks, revealPostDate } from '../src/facebook.js';
 
 test('collector blocks queued work, retries once after six hours, and resumes after recovery', async () => {
@@ -22,11 +23,12 @@ test('collector blocks queued work, retries once after six hours, and resumes af
   const original = chromium.launchPersistentContext;
   chromium.launchPersistentContext = async () => context;
   const dir = await mkdtemp(path.join(tmpdir(), 'fb-collector-test-'));
-  const collector = new FacebookCollector({ dataDir: dir, scanWorkers: 1, log: () => {} });
+  const cooldownDuration = 6 * 60 * 60 * 1000;
+  const collector = new FacebookCollector({ dataDir: dir, scanWorkers: 1, log: () => {}, cooldownMs: cooldownDuration });
   collector.cooldown.now = () => now;
   const scan = () => collector.collect(123, 'https://www.facebook.com/groups/123', null, { latest: true });
   try {
-    const results = await Promise.allSettled([scan(), scan(), collector.collectPost(123, 'https://www.facebook.com/groups/123/posts/42')]);
+    const results = await Promise.allSettled([scan(), scan(), collector.collect(123, 'https://www.facebook.com/groups/123', null, { background: true })]);
     // A background request already in flight may also observe the restriction.
     assert.equal(results[0].reason.code, 'RATE_LIMITED');
     assert.equal(results[1].reason.code, 'FACEBOOK_COOLDOWN');
@@ -34,11 +36,11 @@ test('collector blocks queued work, retries once after six hours, and resumes af
     await assert.rejects(collector.joinedGroups(123), { code: 'FACEBOOK_COOLDOWN' });
     await assert.rejects(collector.comment(123, 'https://www.facebook.com/groups/123/posts/42', 'hello'), { code: 'FACEBOOK_COOLDOWN' });
     assert.equal(requests, before);
-    now += FACEBOOK_COOLDOWN_MS;
+    now += cooldownDuration;
     mode = 'http';
     await assert.rejects(scan(), { code: 'RATE_LIMITED' });
     assert.equal(collector.canScan(123), false);
-    now += FACEBOOK_COOLDOWN_MS;
+    now += cooldownDuration;
     mode = 'ok';
     const attempts = await Promise.allSettled([scan(), scan()]);
     // The serial lane may run the second job normally after the successful probe.
@@ -236,4 +238,37 @@ test('manual login refuses to open a profile while the bot process is active', a
     else process.env.DATA_DIR = previous;
     await removeTestDirectory(dir);
   }
+});
+
+test('collector in default mode has zero cooldown and keeps canScan active after rate limits', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'fb-collector-test-'));
+  const collector = new FacebookCollector({ dataDir: dir, scanWorkers: 1, log: () => {} });
+  try {
+    assert.equal(collector.canScan(123), true);
+    collector.cooldown.pause(123);
+    assert.equal(collector.canScan(123), true);
+  } finally {
+    await collector.close();
+    await removeTestDirectory(dir);
+  }
+});
+
+test('API joined-group reader paginates, marks partial lists as limited and rejects suspicious results', async () => {
+  const page = (ids, next) => JSON.stringify({ data: { viewer: { groups: { edges: ids.map(id => ({ node: { __typename: 'Group', id, name: `G${id}`, url: `https://www.facebook.com/groups/${id}/` }, cursor: id })),
+    page_info: { end_cursor: next, has_next_page: Boolean(next) } } } } });
+  const cursors = [];
+  const pages = [page(['1', '2'], 'A'), page(['3'], null)];
+  const full = await readJoinedGroupsApi(async cursor => { cursors.push(cursor); return pages.shift(); });
+  assert.deepEqual([full.groups.map(group => group.name), full.limited, cursors], [['G1', 'G2', 'G3'], false, [null, 'A']]);
+  let calls = 0;
+  const capped = await readJoinedGroupsApi(async () => page([String(++calls)], `C${calls}`), { maxPages: 2 });
+  assert.deepEqual([capped.groups.length, capped.limited], [2, true]);
+  calls = 0;
+  const deferred = await readJoinedGroupsApi(async () => {
+    if (calls++) throw Object.assign(new Error('cap'), { code: 'SCAN_DEFERRED' });
+    return page(['1'], 'A');
+  });
+  assert.deepEqual([deferred.groups.length, deferred.limited], [1, true]);
+  await assert.rejects(readJoinedGroupsApi(async () => page([], null)), { code: 'GRAPHQL_SCHEMA' });
+  await assert.rejects(readJoinedGroupsApi(async () => page(['1'], null), { baseline: 10 }), { code: 'GRAPHQL_SCHEMA' });
 });

@@ -8,13 +8,14 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/index.js",
+    "start": "node --max-old-space-size=4096 --expose-gc --env-file-if-exists=.env src/index.js",
     "login": "node --env-file-if-exists=.env src/login.js",
     "test": "node --test",
     "benchmark": "node scripts/benchmark-store.js",
     "desktop": "node scripts/desktop.js",
     "desktop:pack": "node scripts/package-desktop.js",
     "desktop:verify": "node scripts/verify-desktop.js",
+    "clean": "node scripts/clean.js",
     "install-browser": "playwright install chromium"
   },
   "dependencies": {

@@ -2,10 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createBot } from "../src/bot.js";
 
-function fixture({ maxFileBytes = 1024, getFile, collector } = {}) {
+function fixture({ maxFileBytes = 1024, getFile, collector, blockWaits, blockProgress } = {}) {
   const replies = [];
   const calls = [];
   const groups = [];
+  let rejectedSince = null;
   const store = {
     ensureUser(ownerId, chatId) { calls.push(["ensureUser", ownerId, chatId]); },
     addGroup(ownerId, url) {
@@ -21,11 +22,18 @@ function fixture({ maxFileBytes = 1024, getFile, collector } = {}) {
     removeGroup(ownerId, id) { calls.push(["removeGroup", ownerId, id]); },
     setPaused(ownerId, id, paused) { calls.push(["setPaused", ownerId, id, paused]); },
     setKeywords(ownerId, id, keywords) { calls.push(["setKeywords", ownerId, id, keywords]); },
+    setRejectKeywords(ownerId, id, keywords) { calls.push(["setRejectKeywords", ownerId, id, keywords]); },
     setDateRange(ownerId, id, range) { calls.push(['setDateRange', ownerId, id, range]); },
+    setRejectedNotify(ownerId, since) { calls.push(['setRejectedNotify', ownerId, since]); rejectedSince = since; },
+    getRejectedNotify() { return rejectedSince; },
+    cancelCommenterBlocks(ownerId, groupId) { calls.push(['cancelCommenterBlocks', ownerId, groupId]); return 2; },
+    pageCommenterBlocks(ownerId, query) { return { items: [], total: 4, page: 1, pages: 1, pageSize: query.pageSize }; },
+    pageGroups(ownerId, query) { const items = this.listGroups(ownerId); return { items, total: items.length, page: 1, pages: 1, pageSize: query.pageSize }; },
     getKeywords() { return []; },
+    getRejectKeywords() { return []; },
     status() { return { groups: 0, active: 0, posts: 0, pending: 0 }; },
   };
-  const bot = createBot({ token: "123456:test_token", allowedUserIds: [1, 2], store, maxFileBytes, collector });
+  const bot = createBot({ token: "123456:test_token", allowedUserIds: [1, 2], store, maxFileBytes, collector, blockWaits, blockProgress });
   bot.botInfo = { id: 123456, is_bot: true, first_name: "Test", username: "test_monitor_bot" };
   bot.api.config.use(async (_previous, method, payload) => {
     if (method === "sendMessage") {
@@ -46,6 +54,22 @@ function fixture({ maxFileBytes = 1024, getFile, collector } = {}) {
   }
   return { send, replies, calls, groups };
 }
+
+test('contacts command uses authenticated owner and reports source details', async () => {
+  const calls = [];
+  const {send,replies} = fixture({collector:{collectCommentContacts: async (...args) => {
+    calls.push(args);
+    return {scanned:2,items:[{author:'Alice',phones:['0912345678'],emails:['a@example.com'],text:'Liên hệ',url:'https://www.facebook.com/a/posts/42?comment_id=1'}]};
+  }}});
+  await send('/contacts');
+  assert.equal(calls.length, 0);
+  await send('/contacts https://www.facebook.com/a/posts/42', {userId:2});
+  assert.deepEqual(calls, [[2,'https://www.facebook.com/a/posts/42']]);
+  assert.match(replies.at(-1).text, /0912345678/);
+  assert.match(replies.at(-1).text, /comment_id=1/);
+  await send('/contacts https://www.facebook.com/a/posts/42', {userId:3});
+  assert.equal(calls.length, 1);
+});
 
 test('profile command validates input and registers mode under the current owner',async () => {
   const {send,replies,calls}=fixture();
@@ -194,4 +218,97 @@ test("Telegram API errors are not echoed with potential credentials", async () =
   await send(undefined, { document: { file_name: "groups.txt", file_id: "file", file_unique_id: "unique" } });
   assert.match(replies.at(-1).text, /Không đọc được file/);
   assert.equal(replies.some((reply) => reply.text.includes("test_token")), false);
+});
+
+test("reject and groupreject commands update store scoped to owner", async () => {
+  const { send, calls, replies } = fixture();
+  await send('/add https://facebook.com/groups/1/ https://facebook.com/groups/2/');
+  await send('/reject lừa đảo; vay tiền');
+  assert.deepEqual(calls.find(c => c[0] === 'setRejectKeywords' && c[2] === null), ['setRejectKeywords', 1, null, ['lừa đảo', 'vay tiền']]);
+  assert.match(replies.at(-1).text, /Đã đặt từ khóa loại trừ/);
+
+  await send('/groupreject 1 spam; quảng cáo');
+  assert.deepEqual(calls.find(c => c[0] === 'setRejectKeywords' && c[2] === 1), ['setRejectKeywords', 1, 1, ['spam', 'quảng cáo']]);
+  assert.match(replies.at(-1).text, /Từ khóa loại trừ.*1 nhóm/);
+
+  await send('/reject');
+  assert.match(replies.at(-1).text, /Từ khóa loại trừ.*mặc định/);
+
+  await send('/groupreject 1 default');
+  assert.deepEqual(calls.filter(c => c[0] === 'setRejectKeywords').at(-1), ['setRejectKeywords', 1, 1, null]);
+  assert.match(replies.at(-1).text, /mặc định tài khoản/);
+
+  await send('/groupkeywords 1 default');
+  assert.deepEqual(calls.filter(c => c[0] === 'setKeywords').at(-1), ['setKeywords', 1, 1, null]);
+  assert.match(replies.at(-1).text, /mặc định tài khoản/);
+});
+
+test("config command displays current accept, reject and source settings", async () => {
+  const { send, replies, groups } = fixture();
+  await send('/config');
+  assert.match(replies.at(-1).text, /CẤU HÌNH HIỆN TẠI/);
+  assert.match(replies.at(-1).text, /Từ khóa nhận \(Accept\)/);
+  assert.match(replies.at(-1).text, /Từ khóa loại trừ \(Reject\)/);
+
+  await send('/add https://facebook.com/groups/100/');
+  await send('/config');
+  assert.match(replies.at(-1).text, /#1.*đang theo dõi/);
+  assert.match(replies.at(-1).text, /Accept: mặc định/);
+  assert.match(replies.at(-1).text, /Reject: mặc định/);
+
+  await send('/config 1');
+  assert.match(replies.at(-1).text, /CẤU HÌNH NGUỒN #1/);
+  assert.match(replies.at(-1).text, /Từ khóa nhận \(Accept\)/);
+  assert.match(replies.at(-1).text, /Từ khóa chặn \(Reject\)/);
+
+  await send('/config 999');
+  assert.match(replies.at(-1).text, /Không tìm thấy nguồn/);
+
+  await send('/list');
+  assert.match(replies.at(-1).text, /Từ khóa nhận \(Accept\)/);
+  assert.match(replies.at(-1).text, /Từ khóa chặn \(Reject\)/);
+});
+
+
+
+test('/rejected toggles notifications for rejected posts and reports status', async () => {
+  const { send, replies, calls } = fixture();
+  await send('/rejected');
+  assert.match(replies.at(-1).text, /TẮT/);
+  await send('/rejected on');
+  assert.match(replies.at(-1).text, /Đã bật gửi bài bị loại/);
+  assert.equal(calls.find(call => call[0] === 'setRejectedNotify')[2] > 0, true);
+  await send('/rejected');
+  assert.match(replies.at(-1).text, /BẬT/);
+  await send('/rejected off');
+  assert.match(replies.at(-1).text, /Đã tắt gửi bài bị loại/);
+  assert.deepEqual(calls.at(-1), ['setRejectedNotify', 1, null]);
+  await send('/rejected xyz');
+  assert.match(replies.at(-1).text, /Cú pháp/);
+});
+
+test('blocks command lists the owner jobs with queue position, progress and counts; cancelblocks is owner scoped',async () => {
+  const owners = [];
+  const jobs = [
+    {id:1,groupId:3,postId:'10',state:'pending',auto:false,result:null,error:null,wait:{text:'Đứng thứ 2/5 trong hàng đợi · 3 luồng đang bận'}},
+    {id:2,groupId:3,postId:'11',state:'running',auto:true,result:null,error:null},
+    {id:3,groupId:4,postId:'12',state:'done',auto:false,result:{blocked:4,skipped:1},error:null},
+    {id:4,groupId:4,postId:'13',state:'failed',auto:false,result:null,error:'Lỗi mạng'},
+  ];
+  const {send,replies,calls} = fixture({blockWaits:(ownerId,options) => { owners.push([ownerId,options.limit]); return jobs; },blockProgress:id => id === 2 ? {phase:'blocking',index:3,total:8} : null});
+  await send('/blocks',{userId:2});
+  assert.deepEqual(owners,[[2,20]]);
+  const text = replies.at(-1).text;
+  assert.match(text,/#3 · bài 10 · thủ công: đang chờ\nĐứng thứ 2\/5 trong hàng đợi · 3 luồng đang bận/);
+  assert.match(text,/bài 11 · tự động: đang chạy\nđang chặn 3\/8/);
+  assert.match(text,/đã xong\nđã chặn 4, bỏ qua 1/);
+  assert.match(text,/chưa xong\nLỗi: Lỗi mạng/);
+  await send('/cancelblocks');
+  assert.match(replies.at(-1).text,/Cú pháp/);
+  await send('/cancelblocks 3',{userId:2});
+  await send('/cancelblocks all');
+  assert.deepEqual(calls.filter(call => call[0] === 'cancelCommenterBlocks'),[['cancelCommenterBlocks',2,3],['cancelCommenterBlocks',1,null]]);
+  assert.match(replies.at(-1).text,/Đã hủy 2 lượt.*[Kk]hông tắt tự chặn.*\/autoblock/);
+  await send('/blocks',{userId:3});
+  assert.equal(owners.length,1);
 });

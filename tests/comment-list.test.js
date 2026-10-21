@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Store } from '../src/store.js';
 import { createBot } from '../src/bot.js';
 import { Monitor } from '../src/monitor.js';
-import { parseCommentList } from '../src/comments.js';
+import { parseCommentList, spinText } from '../src/comments.js';
 
 function fixture(t) {
   const store = new Store(':memory:');
@@ -20,6 +20,21 @@ test('comment list keeps affiliate queries intact and validates every line',()=>
   ]);
   assert.throws(()=>parseCommentList('\n  '));
   assert.throws(()=>parseCommentList(`valid\n${'x'.repeat(2001)}`));
+});
+
+test('spintax picks one option per group, supports nesting and keeps plain braces',async t=>{
+  assert.equal(spinText('{Chào|Hi} bạn, {inbox|ib} nhé',()=>0),'Chào bạn, inbox nhé');
+  assert.equal(spinText('{Chào|Hi} bạn, {inbox|ib} nhé',()=>0.99),'Hi bạn, ib nhé');
+  assert.equal(spinText('{a|{b|c}}',()=>0.99),'c');
+  assert.equal(spinText('Giá {name} {x}',()=>0),'Giá {name} {x}');
+  assert.equal(spinText('https://s.shopee.vn/a?x=1&y=2'),'https://s.shopee.vn/a?x=1&y=2');
+  const {store,group} = fixture(t);
+  store.queueCommentList(1,group.id,['42'],['{Chào|Hi} bạn']);
+  const sent=[];
+  const monitor = new Monitor({store,config:{allowedUserIds:[1]},api:{async sendMessage(){}},
+    collector:{async comment(owner,url,body){sent.push(body);}}});
+  assert.equal(await monitor.commentOne(),true);
+  assert.ok(['Chào bạn','Hi bạn'].includes(sent[0]));
 });
 
 test('five list entries are sent separately in order to the exact same post',async t=>{

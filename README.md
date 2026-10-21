@@ -1,10 +1,122 @@
 # Bot Telegram theo dõi nhóm Facebook
 
+### Liên hệ Zalo từ số điện thoại trong bài
+
+Desktop hiển thị **Liên hệ Zalo** khi nội dung bài có SĐT di động Việt Nam;
+Telegram có nút tương ứng dưới thông báo bài. Bấm **Sao chép SĐT**, rồi **Mở Zalo**
+và dán số vào tìm kiếm. Nếu tìm thấy đúng người, bạn tự nhắn tin hoặc gửi lời mời
+kết bạn trên Zalo. Hỗ trợ dạng `0`, `+84`, `0084`, bỏ số trùng và số bàn.
+
+Đây là thao tác thủ công, chưa kiểm tra tài khoản Zalo tồn tại và chưa tự gửi tin/kết bạn.
+Catalog `zalo-apis-2026-10-16T16-55-42-590Z-23392.json` chỉ ghi endpoint,
+không có payload, thông tin xác thực hay response body; chưa đủ để triển khai
+API tự động. Hướng dẫn tìm bằng SĐT: [Zalo Help](https://help.zalo.me/huong-dan/chuyen-muc/nhan-tin-va-goi/nhan-tin/gui-tin-nhan-mien-phi/).
+
 Prototype chạy trên máy của bạn: gửi link nhóm Facebook hoặc file chứa nhiều link vào Telegram; bot kiểm tra nhóm định kỳ, lọc từ khóa và khoảng ngày đăng. Thông báo có tên nhóm, nội dung, ngày đăng, link bài và link trang cá nhân người đăng khi Facebook cung cấp; không hiển thị số cảm xúc, bình luận, chia sẻ. Bot gửi kèm ảnh/video và hỗ trợ đăng bình luận Facebook từ Telegram.
 
 **Chưa kiểm thử tích hợp với tài khoản Facebook và nhóm thực tế.** Cần đăng nhập bằng tài khoản của bạn và chạy thử một nhóm mẫu để kiểm tra selector, quyền truy cập, nội dung, ngày đăng và link người đăng trước khi sử dụng thường xuyên.
 
+### API và độ trễ sau khi đăng bài
+
+#### Thông báo Facebook hỗ trợ ưu tiên quét nhóm
+
+Trong `SCAN_MODE=api`, bot đọc trang đầu của `CometNotificationsListPaginationQuery`
+(capture 17/10/2026) mỗi 120 giây. Cấu hình `NOTIFICATION_POLL_SECONDS=0` để tắt;
+giá trị khác 0 có khoảng nghỉ tối thiểu thực tế 60 giây. Desktop có mục tương ứng
+trong cài đặt quét Facebook. Luồng này dùng chung phiên, giới hạn request và cooldown.
+
+Lượt đọc đầu chỉ thiết lập mốc để tránh quét lại hàng loạt thông báo cũ sau mỗi lần
+khởi động. Các lượt sau lấy link bài trong thông báo, bỏ bài đã lưu và nhóm chưa
+theo dõi/tạm dừng, rồi đưa tối đa 3 nhóm về lịch quét sớm; mỗi nhóm tối đa một lần
+trong 5 phút. Khoảng cách tối thiểu giữa hai lần quét nhóm vẫn được giữ.
+Không dùng đoạn trích thông báo để lưu bài, lọc từ khóa hoặc gửi bình luận.
+Luồng quét nhóm sẽ đọc bài đầy đủ, áp dụng Accept/Reject, ngày đăng và chống trùng
+hiện có. Không gọi mutation đánh dấu đã đọc/đã xem.
+
+Nhật ký `[THÔNG BÁO]` ghi số link, tín hiệu mới và nhóm được ưu tiên. Lỗi đọc sẽ
+giãn lần thử tiếp theo từ 5 đến 30 phút, không làm dừng luồng quét nhóm/feed.
+Chỉ đọc 15 thông báo ở trang đầu, nên không bảo đảm bắt đủ thông báo khi nhiều
+hoạt động dồn dập. ID truy vấn và cấu trúc phản hồi Facebook có thể thay đổi.
+
+#### Chạy không dùng Chromium
+
+Đặt `FACEBOOK_BROWSERLESS=true` và `SCAN_MODE=api` (đã bật trong `.env` của
+workspace này). Collector dùng HTTP client độc lập, không mở Chromium, không
+render/cuộn trang và không fallback DOM. Nút đăng nhập mở trình duyệt cũng
+bị chặn trong chế độ này. Giao diện desktop vẫn dùng Electron; chạy `npm start`
+nếu muốn vận hành không có giao diện desktop.
+
+Phiên HTTP tách khỏi profile Chromium. Dừng bot, nhập file cookie JSON của
+tài khoản của bạn (mảng cookies hoặc storageState có `cookies`, gồm `c_user`
+và `xs`, domain Facebook), rồi khởi động lại:
+
+```powershell
+npm.cmd run login -- --user-id TELEGRAM_USER_ID --cookies-file "D:\private\cookies.json"
+npm.cmd start
+```
+
+Lệnh nhập phiên không mở trình duyệt và lưu vào `DATA_DIR/sessions/ID.json`
+(được gitignore). Không dán cookie vào chat hoặc commit file cookie. Chỉ kiểm
+tra được phiên còn hiệu lực khi gọi Facebook; hết phiên cần nhập lại.
+
+- Nhóm và feed nhóm: HTTP GraphQL; nguồn nhóm cần ID số đã lưu hoặc URL ID số.
+- Bình luận và gửi lời mời: HTTP mutation từ capture ngày 16/10/2026; `doc_id`
+  có thể hết hiệu lực. Chưa xác nhận hoạt động trên tài khoản thật.
+- Tin nhắn: thử HTTP `/messaging/send/`; không có fallback GraphQL suy đoán
+  hay giao diện. Endpoint không tương thích sẽ báo lỗi; chưa xác nhận với Messenger thực tế.
+- Người nhận kết bạn/inbox cần URL `profile.php?id=ID_SO` hoặc đường dẫn ID số.
+- Không hỗ trợ nháy máy, tự phân giải username, hoặc đọc profile/reel/danh sách
+  bình luận khi chưa có template API. Báo lỗi thay vì mở trang.
+- Mutation không có xác nhận không tự gửi lại/fallback; kiểm tra Facebook trước
+  khi thử lại để tránh trùng. Giới hạn request được dùng chung cho đọc và gửi.
+
+Các mô tả fallback trình duyệt dưới đây chỉ áp dụng khi `FACEBOOK_BROWSERLESS=false`.
+
+Đối chiếu hai catalog ngày 16/10/2026 trong `D:\Project\drag\output`: có
+`useCometUFICreateCommentMutation`, `FriendingCometFriendRequestSendMutation`
+và truy vấn feed nhóm. Catalog không lưu response body và chưa xác nhận API
+gửi tin nhắn. HTTP 200 trong capture không chứng minh thao tác thành công.
+Bot đã có nhánh API cho bình luận, lời mời kết bạn và nhắn tin, kèm fallback
+giao diện; nhánh nhắn tin cần kiểm chứng riêng trên phiên đăng nhập thực tế.
+`doc_id` cho thao tác gửi lấy từ trang hiện tại vì ID trong capture có thể hết hiệu lực.
+
+**Không đảm bảo hoàn tất trong 1 giây kể từ lúc bài được đăng.** Cấu hình mặc
+định quét nhóm từ 120 giây, nhóm ít hoạt động có thể giãn tới 1.800 giây;
+API nghỉ 3–8 giây và có trần 400 request/giờ/tài khoản. Sau khi phát hiện bài,
+monitor đánh thức worker bình luận, nhắn tin và kết bạn ngay, nhưng vẫn phải
+chờ hàng đợi, phiên đăng nhập và phản hồi Facebook. Thời gian hoàn tất gồm
+độ trễ phát hiện + chờ hàng đợi + thời gian thực hiện. Giảm chu kỳ quét không
+tạo ra cam kết 1 giây. Kết bạn ở đây là **gửi lời mời**, còn trở thành bạn bè
+phụ thuộc người nhận chấp nhận.
+
+API chỉ xác nhận bình luận khi có ID bình luận; kết bạn khi phản hồi có đúng
+người nhận và trạng thái tương ứng; tin nhắn khi có xác nhận message từ API.
+Các kiểm tra tự động dùng phản hồi mô phỏng, không phải phép đo độ trễ thực tế.
+
+> 📖 **Xem tài liệu tổng hợp đầy đủ:** [Thống kê toàn bộ chức năng hệ thống](docs/05-THONG-KE-TOAN-BO-CHUC-NANG.md)
+
 ## Menu và thao tác bằng nút
+
+- Thử bộ lọc trên Telegram hoặc Bảng lệnh Desktop:
+  `/testfilter default | CÓ BẠN nào hỗ trợ không?` dùng cấu hình mặc định;
+  `/testfilter 813 | nội dung bài` dùng Accept/Reject hiệu lực của nguồn #813.
+  Có thể trả lời tin chứa nội dung bằng `/testfilter` hoặc `/testfilter 813`.
+  Kết quả liệt kê từ khóa khớp và lý do nhận/loại; Reject luôn ưu tiên.
+  Chức năng chỉ thử từ khóa, không lưu bài, không xếp bình luận và không xét ngày đăng.
+
+Bộ lọc Accept/Reject phân biệt dấu tiếng Việt, không phân biệt hoa/thường:
+`có bạn` khớp `CÓ BẠN`, nhưng không khớp `cơ bản` hoặc `co ban`.
+Muốn nhận cả dạng không dấu, thêm riêng từ khóa đó, ví dụ `có bạn; co ban`.
+
+- `/hot https://www.facebook.com/groups/826392100466750`: xem riêng nhóm này
+  đang **Top X/Y** trong tất cả nguồn đang theo dõi của bạn. `/hot 10` vẫn xem top 10.
+
+- `/search tên, link hoặc ID nhóm`: tìm nguồn đã thêm và xem **Top X/Y** theo
+  cùng bảng `/hot` (bài phù hợp bộ lọc trong 48 giờ). Xếp hạng trên toàn bộ nguồn
+  đang theo dõi của tài khoản, không chỉ kết quả tìm; nguồn tạm dừng không xếp hạng.
+  Cùng số bài phù hợp thì xét tổng bài, rồi ID nguồn tăng dần. Đây là thứ hạng
+  trong dữ liệu bot, không phải thứ hạng tìm kiếm Facebook. Desktop có ô
+  **Tìm và xem thứ hạng** tại trang **Nguồn sôi động**. Dùng `/hot 10` để xem top 10.
 
 - `/start` hoặc `/menu`: mở menu gồm Thêm nguồn, Quản lý nguồn, Quét & xem bài,
   Bộ lọc & cài đặt, Bình luận & link, Trạng thái.
@@ -146,7 +258,14 @@ HISTORY_INTERVAL_SECONDS=600
 HEADLESS=true
 SCROLL_PASSES=3
 METRIC_WINDOW_HOURS=24
-METRIC_REFRESH_SECONDS=600
+SCAN_MODE=api
+SCAN_MIN_INTERVAL_SECONDS=120
+SCAN_MAX_INTERVAL_SECONDS=1800
+API_MIN_DELAY_MS=3000
+API_MAX_DELAY_MS=8000
+API_MAX_REQUESTS_PER_HOUR=400
+API_CONCURRENCY=1
+API_TEMPLATE_TTL_MINUTES=360
 ```
 
 | Biến | Ý nghĩa |
@@ -158,8 +277,14 @@ METRIC_REFRESH_SECONDS=600
 | `HISTORY_INTERVAL_SECONDS` | Khoảng nghỉ giữa các lượt quét lịch sử của một nhóm; mặc định 600 giây, tối thiểu 60 giây. Chạy riêng với quét bài mới. |
 | `HEADLESS` | `true`: chạy browser ẩn; `false`: mở cửa sổ khi bot quét. |
 | `SCROLL_PASSES` | Số lượt đọc/cuộn tạo mốc ban đầu và quét nền khi không đặt khoảng ngày, từ 1 đến 10. Quét bài mới sau đó chỉ đọc phần đầu feed. |
-| `METRIC_WINDOW_HOURS` | Cửa sổ mở lại bài đã phát hiện để cập nhật nội dung; giữ tên biến cũ để tương thích cấu hình. |
-| `METRIC_REFRESH_SECONDS` | Khoảng thời gian tối thiểu trước khi mở lại bài để cập nhật nội dung; mặc định 600 giây. |
+| `METRIC_WINDOW_HOURS` | Cửa sổ cập nhật nội dung bài đã gửi (sửa tin Telegram) khi lượt quét feed gặp lại bài; giữ tên biến cũ để tương thích cấu hình. Bot không còn mở từng bài để cập nhật. |
+| `SCAN_MODE` | `api` (mặc định): gọi lại truy vấn GraphQL feed nhóm của chính Facebook bằng phiên của bot, không render trang; template lấy từ lần mở nhóm bằng trình duyệt. Lỗi template/schema tự chuyển sang trình duyệt cho lượt đó. `browser`: luôn đọc bằng trình duyệt như trước. Trang cá nhân luôn dùng trình duyệt. |
+| `SCAN_MIN_INTERVAL_SECONDS` | Khoảng quét nhóm vừa có bài mới; mặc định 120 giây. |
+| `SCAN_MAX_INTERVAL_SECONDS` | Khoảng quét tối đa; nhóm không có bài mới được giãn x1.5 mỗi lượt tới mức này; mặc định 1800 giây. Nút “Quét lại” vẫn chạy ngay. |
+| `API_MIN_DELAY_MS`, `API_MAX_DELAY_MS` | Độ trễ ngẫu nhiên giữa hai request GraphQL của cùng tài khoản; mặc định 3000–8000 ms. |
+| `API_MAX_REQUESTS_PER_HOUR` | Trần request GraphQL mỗi tài khoản mỗi giờ; mặc định 400. Hết trần thì hoãn quét tài khoản đó, không ghi lỗi. |
+| `API_CONCURRENCY` | Số request GraphQL đồng thời mỗi tài khoản, 1–4; mặc định 1. |
+| `API_TEMPLATE_TTL_MINUTES` | Thời gian dùng lại template GraphQL trước khi lấy lại bằng trình duyệt; mặc định 360 phút. |
 
 ## Đăng nhập Facebook và chạy bot
 
@@ -168,7 +293,7 @@ Mỗi Telegram user cần đăng nhập Facebook một lần tại máy chạy b
 Ví dụ user ID `123456789`:
 
 ```powershell
-npm.cmd run login -- --user-id 123456789
+npm.cmd run login -- --user-id 8501763395
 ```
 
 Đăng nhập trực tiếp trong cửa sổ Chromium mở ra và xử lý xác minh nếu Facebook yêu cầu. Làm theo hướng dẫn trong terminal để kết thúc. Profile được lưu tại `data/profiles/123456789` nếu giữ `DATA_DIR=./data`.
@@ -431,7 +556,7 @@ Trình duyệt dùng ngày có sẵn trên permalink thay vì chờ tooltip và 
 nội dung trang khi đã có link bài hợp lệ. Vẫn kiểm tra đăng nhập và quyền truy cập.
 
 Đây là tốc độ xử lý nội bộ, không phải mức tăng tốc quét Facebook đầu cuối.
-Bot có tối đa 4 worker quét; `SCAN_WORKERS=1..4` điều chỉnh số tab theo tài nguyên máy.
+Bot có tối đa 16 worker quét; `SCAN_WORKERS=1..16` điều chỉnh số tab theo tài nguyên máy.
 Quét lịch sử chạy riêng theo `HISTORY_INTERVAL_SECONDS`; bình luận vẫn cách nhau ít
 nhất 30 giây. Khởi động lại bot để áp dụng mã mới; chỉ mục được tạo tự động, lần
 khởi động đầu có thể lâu hơn nếu cơ sở dữ liệu lớn. Chưa đo trên dữ liệu thật.

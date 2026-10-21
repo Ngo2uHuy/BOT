@@ -19,6 +19,9 @@ test('post buttons link to the correct post/profile and provide anonymous fallba
   assert.equal(new URL(markup.inline_keyboard[0][1].url).searchParams.get('url'),'https://www.facebook.com/groups/123/posts/10');
   assert.equal(markup.inline_keyboard[2][0].url,'https://www.facebook.com/profile.php?id=8');
   assert.equal(postButtons({url:'https://www.facebook.com/groups/123/posts/10'}).inline_keyboard[2][0].callback_data,'post:no-profile');
+  // Only the commenter block is offered on accepted posts, just above Menu; never the author block.
+  assert.deepEqual(markup.inline_keyboard.slice(-2).map(row => row[0].callback_data),['post:block-commenters','nav:home']);
+  assert.equal(markup.inline_keyboard.flat().some(button => /^rejected:/.test(button.callback_data || '')),false);
 });
 
 test('comment button prompts without posting, maps the prompt and enforces ownership',async t=>{
@@ -126,6 +129,19 @@ test('auto reply excludes history, unknown dates, baseline and reobserved posts;
   assert.equal(store.setAutoReply(2,group.id,null),0);
   store.setAutoReply(1,group.id,null);
   assert.equal(store.nextComment([1]),undefined);
+});
+
+test('auto reply follows the first delivery when a filter change lets an already-seen post through, but not stale posts',t=>{
+  const {store,group,options,post} = setup(t);
+  const day=86400000, now=10*day;
+  store.setAutoReply(1,group.id,'auto',1000);
+  const fresh=post('20',{publishedAt:new Date(now-1000).toISOString()}), stale=post('21',{publishedAt:new Date(now-day-1000).toISOString()});
+  store.observe(group,[fresh,stale],{...options,now,matches:()=>false});
+  assert.equal(store.listComments(1).length,0);
+  store.observe(group,[fresh,stale],{...options,now:now+1000,metricWindowMs:2*day});
+  assert.deepEqual(store.listComments(1).map(row=>row.post_id),['20']);
+  store.observe(group,[fresh,stale],{...options,now:now+2000,metricWindowMs:2*day});
+  assert.equal(store.listComments(1).length,1);
 });
 
 test('comment worker submits once and never retries an ambiguous failure',async t=>{

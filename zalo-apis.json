@@ -1,0 +1,339 @@
+{
+  "startedAt": "2026-10-16T16:55:42.590Z",
+  "updatedAt": "2026-10-16T17:01:43.506Z",
+  "platform": "zalo",
+  "scope": "Observed zalo.me fetch/XHR only; not a complete API inventory.",
+  "privacy": "No cookies, headers, query values, variables or response bodies. Unknown path segments redacted.",
+  "endpoints": [
+    {
+      "method": "GET",
+      "origin": "https://jr.zalo.me",
+      "pathname": "/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://jr.chat.zalo.me",
+      "pathname": "/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://wpa.chat.zalo.me",
+      "pathname": "/api/login/getServerInfo",
+      "resourceType": "xhr",
+      "count": 2,
+      "statuses": {
+        "200": 2
+      },
+      "failed": 0
+    },
+    {
+      "method": "POST",
+      "origin": "https://za.zalo.me",
+      "pathname": "/:segment/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://chat.zalo.me",
+      "pathname": "/:segment/:segment",
+      "resourceType": "fetch",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://wpa.chat.zalo.me",
+      "pathname": "/api/login/getLoginInfo",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://label-wpa.chat.zalo.me",
+      "pathname": "/api/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://zcld.chat.zalo.me",
+      "pathname": "/:segment/info/:segment/v1/:segment",
+      "resourceType": "xhr",
+      "count": 2,
+      "statuses": {
+        "200": 2
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-convers-wpa.chat.zalo.me",
+      "pathname": "/api/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 4,
+      "statuses": {
+        "200": 4
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-convers-wpa.chat.zalo.me",
+      "pathname": "/api/pinconvers/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-sticker-wpa.chat.zalo.me",
+      "pathname": "/api/message/sticker/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 3,
+      "statuses": {
+        "200": 3
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-convers-wpa.chat.zalo.me",
+      "pathname": "/api/:segment/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-profile-wpa.chat.zalo.me",
+      "pathname": "/api/social/profile/:segment",
+      "resourceType": "xhr",
+      "count": 21,
+      "statuses": {
+        "200": 21
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-sticker-wpa.chat.zalo.me",
+      "pathname": "/api/message/sticker/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-sticker-wpa.chat.zalo.me",
+      "pathname": "/api/message/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://wpa.chat.zalo.me",
+      "pathname": "/api/login/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-group-wpa.chat.zalo.me",
+      "pathname": "/api/group/getlg/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-friend-wpa.chat.zalo.me",
+      "pathname": "/api/friend/profile/:segment",
+      "resourceType": "xhr",
+      "count": 2,
+      "statuses": {
+        "200": 2
+      },
+      "failed": 0
+    },
+    {
+      "method": "POST",
+      "origin": "https://tt-profile-wpa.chat.zalo.me",
+      "pathname": "/api/social/friend/getprofiles/v2",
+      "resourceType": "xhr",
+      "count": 7,
+      "statuses": {
+        "200": 7
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-sticker-wpa.chat.zalo.me",
+      "pathname": "/api/message/sticker/search",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://friendboard-wpa.chat.zalo.me",
+      "pathname": "/api/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 3,
+      "statuses": {
+        "200": 3
+      },
+      "failed": 0
+    },
+    {
+      "method": "POST",
+      "origin": "https://tt-chat1-wpa.chat.zalo.me",
+      "pathname": "/api/message/:segment",
+      "resourceType": "xhr",
+      "count": 5,
+      "statuses": {
+        "200": 5
+      },
+      "failed": 0
+    },
+    {
+      "method": "POST",
+      "origin": "https://tt-chat1-wpa.chat.zalo.me",
+      "pathname": "/api/message/sms",
+      "resourceType": "xhr",
+      "count": 3,
+      "statuses": {
+        "200": 3
+      },
+      "failed": 0
+    },
+    {
+      "method": "POST",
+      "origin": "https://tt-chat1-wpa.chat.zalo.me",
+      "pathname": "/api/message/undo",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-group-cm.chat.zalo.me",
+      "pathname": "/api/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-friend-wpa.chat.zalo.me",
+      "pathname": "/api/friend/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 5,
+      "statuses": {
+        "200": 5
+      },
+      "failed": 0
+    },
+    {
+      "method": "POST",
+      "origin": "https://tt-friend-wpa.chat.zalo.me",
+      "pathname": "/api/friend/group/:segment",
+      "resourceType": "xhr",
+      "count": 2,
+      "statuses": {
+        "200": 2
+      },
+      "failed": 0
+    },
+    {
+      "method": "POST",
+      "origin": "https://tt-friend-wpa.chat.zalo.me",
+      "pathname": "/api/friend/:segment/:segment",
+      "resourceType": "xhr",
+      "count": 2,
+      "statuses": {
+        "200": 2
+      },
+      "failed": 0
+    },
+    {
+      "method": "GET",
+      "origin": "https://tt-friend-wpa.chat.zalo.me",
+      "pathname": "/api/friend/:segment",
+      "resourceType": "xhr",
+      "count": 3,
+      "statuses": {
+        "200": 3
+      },
+      "failed": 0
+    },
+    {
+      "method": "POST",
+      "origin": "https://tt-friend-wpa.chat.zalo.me",
+      "pathname": "/api/friend/:segment",
+      "resourceType": "xhr",
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "failed": 0
+    }
+  ]
+}

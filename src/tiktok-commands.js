@@ -1,4 +1,5 @@
 import { parseTopOptions } from './affiliate.js';
+import { listPager } from './listing.js';
 import { TikTokAffiliate, parseTikTokInput } from './tiktok-affiliate.js';
 
 export function installTikTokCommands(bot,store,affiliate=new TikTokAffiliate()) {
@@ -82,16 +83,15 @@ export function installTikTokCommands(bot,store,affiliate=new TikTokAffiliate())
     try {options=parseTopOptions(match[3]);} catch(error) {return ctx.reply(error.message);}
     return top(ctx,options,{groupId:Number(match[1]),postId:match[2]});
   });
-  bot.command('tiktoklinks',async ctx=>{
+  const pager=listPager(bot);
+  pager.define('tiktoklinks',(ctx,query)=>{
     const account=affiliate.accountKey(ctx.from.id);
-    if(!account) return info(ctx);
-    const raw=String(ctx.match || '1').trim();
-    if(!/^[1-9]\d{0,5}$/.test(raw)) return ctx.reply('Cú pháp: /tiktoklinks [trang].');
-    const links=store.listAffiliateLinks(ctx.from.id,account,(Number(raw)-1)*10);
-    if(!links.length) return ctx.reply('Chưa có link TikTok ở trang này. Dùng /tiktoktop 5 hoặc /tiktok LINK.');
-    for(const link of links) await ctx.reply(`#${link.id}\n${link.affiliate_url}`,{link_preview_options:{is_disabled:true}});
-    return ctx.reply(`Trang tiếp: /tiktoklinks ${Number(raw)+1}\n/tiktokcomment ID_nguồn ID_bài | ID_link1,ID_link2`);
-  });
+    if(!account) return 'Chưa cấu hình tài khoản TikTok cho ID Telegram này. Xem /tiktok status.';
+    const result=store.pageAffiliateLinks(ctx.from.id,account,query);
+    return {result,title:'🎵 Link TikTok đã lưu',empty:'Chưa có link TikTok. Dùng /tiktoktop 5 hoặc /tiktok LINK.',remove:'links',lines:result.items.map(link=>`#${link.id} · ${link.affiliate_url}`),
+      footer:['/tiktokcomment ID_nguồn ID_bài | ID_link1,ID_link2']};
+  },'links');
+  bot.command('tiktoklinks',ctx=>affiliate.accountKey(ctx.from.id) ? pager.command(ctx,'tiktoklinks',ctx.match) : info(ctx));
   bot.command('tiktokcomment',async ctx=>{
     const match=String(ctx.match || '').match(/^\s*([1-9]\d*)\s+([A-Za-z0-9_-]+)\s*\|\s*([\d,\s]+)$/);
     if(!match || !Number.isSafeInteger(Number(match[1])) || match[2].toLowerCase()==='all') return ctx.reply('Cú pháp: /tiktokcomment ID_nguồn ID_bài | ID_link1,ID_link2. ID link lấy từ /tiktoklinks.');

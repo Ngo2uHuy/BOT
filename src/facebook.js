@@ -1,13 +1,20 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import { openHttpContext, loadHttpSession, browserUnavailable, submitHttpAction } from './facebook-http.js';
 import { parseDay } from './dates.js';
 import { normalizeMedia } from './media.js';
 import { commentText, submitComment } from './comments.js';
+import { readCommentContacts, readCommentContactsApi } from './comment-contacts.js';
+import { directMessageText, sendDirectMessage, isAnonymousAuthor, profileIdFromHtml } from './direct-messages.js';
+import { sendFriendRequest } from './friends.js';
 import { BrowserQueue } from './browser-queue.js';
+import { notificationHints } from './notifications.js';
 import { inspectScanPage, emptyScanError } from './scan-diagnostics.js';
-import { FacebookCooldown, rateLimitError } from './facebook-cooldown.js';
-import { readJoinedGroups } from './joined-groups.js';
+import { FacebookCooldown, FACEBOOK_COOLDOWN_MS, rateLimitError } from './facebook-cooldown.js';
+import { readJoinedGroups, readJoinedGroupsApi } from './joined-groups.js';
 import { normalizeProfileUrl, normalizeProfilePostUrl, profileReelsUrl, extractProfileSnapshots } from './profile.js';
+import { parseGraphQLStream, extractPostsFromPageScripts, extractPageInfo } from './facebook-api.js';
+import { BUILTIN_QUERIES, GraphQLFeedClient, RequestLimiter, captureFeedTemplate, captureQueryTemplate, captureSession, describeGraphQLRequest, extractProfileGraphQLPosts, extractSessionFromHtml, groupIdFromUrl, paginateFeed, schemaError } from './facebook-graphql.js';
 
 export function normalizeAuthorUrl(value) {
   try {
@@ -194,7 +201,7 @@ export function normalizeSnapshots(snapshots, groupUrl) {
     const post = {
       id: link.id, url: link.url, text: String(snapshot.text ?? '').trim().slice(0, 30000),
       author: typeof snapshot.author === 'string' ? snapshot.author.trim().slice(0, 300) || null : null,
-      authorUrl: normalizeAuthorUrl(snapshot.authorUrl),
+      authorUrl: isAnonymousAuthor(snapshot.author) ? null : normalizeAuthorUrl(snapshot.authorUrl),
       publishedAt: [snapshot.publishedAt, ...(snapshot.dateLabels || [])].map(parsePublishedAt).find(Boolean) || null,
       media: normalizeMedia(snapshot.media),
     };
@@ -215,7 +222,7 @@ function allowedNavigation(value) {
 // Facebook renders the post timestamp link with a placeholder href ("?__cft__...#?fkg"
 // or "#") and only fills in the real /groups/ID/posts/ID permalink on hover/focus.
 // Hovering is a pointer move only; nothing is ever clicked here.
-export async function revealPostDate(page, link, timeout = 1500) {
+export async function revealPostDate(page, link, timeout = 800) {
   if (parsePublishedAt(await link.getAttribute('data-post-date'))) return;
   const metadata=await link.evaluate(node=>({href:node.href,labels:[node.getAttribute('aria-label'),node.getAttribute('title')]}));
   // Placeholder links still need hover to resolve their permalink.
@@ -227,7 +234,7 @@ export async function revealPostDate(page, link, timeout = 1500) {
   // Clear the previous hover first. Facebook may render a portal tooltip without
   // aria-describedby; never attribute a tooltip already visible to another post.
   await page.mouse.move(0,0);
-  await page.waitForTimeout(100);
+  await page.waitForTimeout(50);
   const before = await page.locator('[role="tooltip"]:visible').allTextContents();
   if (!await link.hover({timeout:500}).then(()=>true,()=>false)) return;
   const until = Date.now()+timeout;
@@ -241,7 +248,7 @@ export async function revealPostDate(page, link, timeout = 1500) {
       await link.evaluate((node,value)=>node.setAttribute('data-post-date',value),date);
       return;
     }
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(50);
   } while (Date.now()<until);
 }
 
@@ -280,20 +287,95 @@ async function assertReadable(page, context) {
 
 export class FacebookCollector {
   #queue;
-  #commentQueue = new BrowserQueue(1);
-  #backgroundQueue = new BrowserQueue(1);
+  #commentQueue;
+  #backgroundQueue;
   #profiles = new Map();
   #closed = false;
   #contexts = new Set();
+  #readCounts = new Map();
+  #fallbackLogs = new Map();
+  #captureMisses = new Map();
+  #sessionMisses = new Map();
+  #sessionErrors = new Map();
+  #sessionLoads = new Map();
+  #unmatchedLogs = new Map();
 
-  constructor({ dataDir, headless = true, scrollPasses = 3, scanWorkers = 4, log = console.warn }) {
+  constructor({
+    dataDir, headless = true, scrollPasses = 3, scanWorkers = 4,
+    commentWorkers = 4, backgroundWorkers = 2,
+    log = console.warn, cooldownMs = FACEBOOK_COOLDOWN_MS,
+    scanMode = 'browser', apiConcurrency = 1, apiMinDelayMs = 3000, apiMaxDelayMs = 8000,
+    apiMaxRequestsPerHour = 400, apiTemplateTtlMs = 6 * 3600000, graphql = null, apiBootstrap = true, browserless = false, apiLog = true,
+  }) {
     if (!dataDir) throw new Error('Cần cấu hình dataDir.');
     if (!Number.isInteger(scrollPasses) || scrollPasses < 1 || scrollPasses > 10) throw new Error('scrollPasses phải nằm trong khoảng 1–10.');
     this.#queue = new BrowserQueue(scanWorkers);
+    this.#commentQueue = new BrowserQueue(Math.max(4, commentWorkers));
+    this.#backgroundQueue = new BrowserQueue(Math.max(2, backgroundWorkers));
     this.dataDir = path.resolve(dataDir);
-    this.cooldown = new FacebookCooldown(this.dataDir, { log });
+    this.cooldown = new FacebookCooldown(this.dataDir, { log, cooldownMs });
     this.headless = headless;
     this.scrollPasses = scrollPasses;
+    this.log = log;
+    this.scanMode = scanMode;
+    this.browserless = browserless;
+    this.apiLog = apiLog;
+    if (browserless && scanMode !== 'api') throw new Error('HTTP-only yêu cầu SCAN_MODE=api.');
+    this.apiBootstrap = apiBootstrap;
+    this.graphql = graphql || new GraphQLFeedClient({ ttlMs: apiTemplateTtlMs, builtins: apiBootstrap ? BUILTIN_QUERIES : {},
+      limiter: new RequestLimiter({ concurrency: apiConcurrency, minDelayMs: apiMinDelayMs, maxDelayMs: apiMaxDelayMs, maxPerHour: apiMaxRequestsPerHour,
+        onSlowdown: (ownerId, slow, reason) => log(`[TỐC ĐỘ | Tài khoản ${ownerId}] ${reason}: khoảng cách request x${slow.toFixed(1)} (${Math.round(apiMinDelayMs * slow)} ms).`) }) });
+  }
+
+  // One plain HTML GET yields the session tokens, so built-in queries run before any render-and-scroll
+  // capture visit. Misses are retried at most every 30 minutes; rate limits still reach the cooldown.
+  async #ensureSession(ownerId) {
+    if (this.#sessionLoads.has(ownerId)) return this.#sessionLoads.get(ownerId);
+    const loading = this.#loadSession(ownerId);
+    this.#sessionLoads.set(ownerId, loading);
+    try { return await loading; }
+    finally { this.#sessionLoads.delete(ownerId); }
+  }
+
+  async #loadSession(ownerId) {
+    if (!this.apiBootstrap || this.graphql.session(ownerId)) return;
+    if (Date.now() - (this.#sessionMisses.get(ownerId) || 0) < 1800000) {
+      // HTTP-only has no browser fallback: keep reporting the real cause instead of a missing template.
+      if (this.browserless && this.#sessionErrors.has(ownerId)) throw this.#sessionErrors.get(ownerId);
+      return;
+    }
+    this.#sessionMisses.set(ownerId, Date.now());
+    let html = '';
+    try {
+      const context = await this.#context(ownerId);
+      html = await this.graphql.limiter.run(ownerId, async () => {
+        const response = await context.request.get('https://www.facebook.com/', { maxRedirects: 0, timeout: 30000, failOnStatusCode: false });
+        if (response.status() === 429 || /checkpoint/i.test(response.headers().location || '')) throw rateLimitError();
+        return response.status() === 200 ? response.text() : '';
+      });
+    } catch (error) {
+      if (this.browserless || error.code === 'RATE_LIMITED' || error.code === 'SCAN_DEFERRED') throw error;
+      return;
+    }
+    if (this.#rememberSession(ownerId, extractSessionFromHtml(html), 'HTML')) {
+      this.#sessionMisses.delete(ownerId);
+      this.#sessionErrors.delete(ownerId);
+      return;
+    }
+    if (!this.browserless) return;
+    const loggedOut = /"USER_ID":"0"|name="pass"/.test(html);
+    const error = new Error(loggedOut
+      ? `Phiên Facebook HTTP đã bị đăng xuất (Facebook trả trang đăng nhập). Dừng bot, chạy npm run login -- --user-id ${ownerId} rồi khởi động lại.`
+      : 'Không đọc được token phiên từ trang chủ Facebook; kiểm tra cookie hoặc checkpoint.');
+    error.code = 'FACEBOOK_SESSION';
+    this.#sessionErrors.set(ownerId, error);
+    throw error;
+  }
+
+  #rememberSession(ownerId, session, source) {
+    if (!session) return false;
+    if (this.graphql.rememberSession(ownerId, session)) this.log(`[QUÉT API | Tài khoản ${ownerId}] Đã lấy phiên GraphQL từ ${source}; gọi API trực tiếp, không cần cuộn trang.`);
+    return true;
   }
 
   collect(ownerId, groupUrl, dateRange = null, options = {}) {
@@ -303,23 +385,163 @@ export class FacebookCollector {
       return this.#enqueue(ownerId, canContinue => this.#collectProfile(ownerId, profile, dateRange, guardedOptions(canContinue)), false, options.background, !options.background);
     }
     const normalized = normalizeFacebookGroupUrl(groupUrl);
-    return this.#enqueue(ownerId, canContinue => this.#read(ownerId, `${normalized}?sorting_setting=CHRONOLOGICAL`, normalized, null, dateRange, null, guardedOptions(canContinue)), false, options.background, !options.background);
+    return this.#enqueue(ownerId, canContinue => this.#collectGroup(ownerId, normalized, dateRange, guardedOptions(canContinue)), false, options.background, !options.background);
   }
 
-  joinedGroups(ownerId) {
-    return this.#enqueue(ownerId, ()=>this.#read(ownerId,'https://www.facebook.com/groups/joins/',null,null,null,readJoinedGroups));
+  async #collectGroup(ownerId, groupUrl, dateRange, options) {
+    if (this.scanMode !== 'api') return this.#readGroup(ownerId, groupUrl, dateRange, options);
+    // A logged-out HTTP session must surface as such, not as an unreadable group ID.
+    if (this.browserless && !this.graphql.template(ownerId)) await this.#ensureSession(ownerId);
+    const groupId = options.numericId || groupIdFromUrl(groupUrl) || (this.browserless ? await this.#resolveGroupId(ownerId, groupUrl, options) : null);
+    if (groupId && !this.graphql.template(ownerId)) await this.#ensureSession(ownerId);
+    if (groupId && this.graphql.template(ownerId)) {
+      try { return await this.#collectApi(ownerId, groupUrl, groupId, dateRange, options); }
+      catch (error) {
+        if (this.browserless) throw error;
+        if (error.code !== 'GRAPHQL_SCHEMA') throw error;
+        this.graphql.invalidate(ownerId);
+        this.#apiFallback(ownerId, ownerId, error);
+      }
+    }
+    // A missed capture is retried at most every 30 minutes so scans do not keep paying extra scrolls.
+    const captureTemplate = Date.now() - (this.#captureMisses.get(ownerId) || 0) >= 1800000;
+    return this.#readGroup(ownerId, groupUrl, dateRange, { ...options, captureTemplate });
   }
 
-  collectPost(ownerId, postUrl) {
-    const normalized = normalizePostUrl(postUrl);
-    if (!normalized) return Promise.reject(new Error('Link bài Facebook không hợp lệ.'));
+  // HTTP-only has no capture visit to learn a slug group's numeric ID; the group page HTML carries it
+  // as "groupID". Only a single distinct value is trusted, since pages can embed other groups.
+  async #resolveGroupId(ownerId, groupUrl, options) {
+    const context = await this.#context(ownerId);
+    const html = await this.graphql.limiter.run(ownerId, async () => {
+      const response = await context.request.get(groupUrl.replace(/\/?$/, '/'), { timeout: 30000, failOnStatusCode: false });
+      if (response.status() === 429 || /checkpoint/i.test(response.headers().location || '')) throw rateLimitError();
+      return response.status() === 200 ? response.text() : '';
+    });
+    const ids = new Set([...html.matchAll(/"groupID":"(\d{5,25})"/g)].map(match => match[1]));
+    if (ids.size !== 1) throw new Error('HTTP-only: không đọc được ID số của nhóm từ trang nhóm. Dùng /joined refresh hoặc thêm nhóm bằng link ID số.');
+    const [groupId] = ids;
+    try { options.onGroupId?.(groupId); } catch { /* Persisting the alias is best effort. */ }
+    return groupId;
+  }
+
+  #readGroup(ownerId, groupUrl, dateRange, options) {
+    return this.#read(ownerId, `${groupUrl}?sorting_setting=CHRONOLOGICAL`, groupUrl, null, dateRange, null, options);
+  }
+
+  #pageOptions(dateRange, options) {
+    const latest = Boolean(options.latest) && !dateRange;
+    const watermark = Number.isFinite(options.watermark) ? options.watermark : null;
+    // Only a requested backfill pages back to the range start; other range passes stop at the watermark.
+    const cutoff = dateRange ? Math.max(dateRange.start - 1, options.backfill ? -Infinity : watermark ?? -Infinity) : watermark;
+    const maxPages = dateRange ? (options.backfill ? 300 : Math.min(3, this.scrollPasses)) : latest ? (cutoff === null ? 1 : 5) : this.scrollPasses;
+    return {
+      cutoff, maxPages, latest, stopAfterOld: 3, shouldContinue: options.shouldContinue,
+      onPage: async page => {
+        // Same rule as the browser lane: undated posts are never persisted early.
+        const ready = page.filter(post => post.publishedAt);
+        if (ready.length && options.onPosts) await options.onPosts(ready);
+      },
+    };
+  }
+
+  async #collectApi(ownerId, groupUrl, groupId, dateRange, options) {
+    const context = await this.#context(ownerId);
+    const pageOptions = this.#pageOptions(dateRange, options);
+    // A routine "anything new?" check needs only the newest few posts; later pages use full pages.
+    const firstCount = pageOptions.latest && pageOptions.cutoff !== null ? 3 : 10;
+    const { posts } = await paginateFeed((cursor, page) => this.graphql.fetchPage(context.request, ownerId, { groupId, groupUrl, cursor, count: page ? 10 : firstCount }), pageOptions);
+    // One empty, private or left group says nothing about the account-wide template, so it is not invalidated.
+    if (!posts.length) throw Object.assign(new Error('[EMPTY_FEED] Trang GraphQL đầu tiên của nhóm không có bài nào; nhóm có thể trống, riêng tư hoặc tài khoản đã rời nhóm.'), { code: 'EMPTY_FEED' });
+    return posts;
+  }
+
+  // Newest posts across every joined group from the chronological "Most recent" groups feed. Pages
+  // stop at the first post at or before `watermark`; without one only the first page is read.
+  recentGroupPosts(ownerId, { watermark = null, maxPages = 4 } = {}) {
+    if (this.scanMode !== 'api') return Promise.resolve([]);
     return this.#enqueue(ownerId, async () => {
-      if (normalized.kind) return this.#readProfilePost(ownerId, normalized);
-      const posts = await this.#read(ownerId, normalized.url, normalized.groupUrl, normalized.id);
-      const post = posts.find(item => item.id === normalized.id);
-      if (!post) throw new Error('Không tìm thấy bài cần cập nhật. Bài có thể bị xóa, mất quyền truy cập hoặc giao diện Facebook đã thay đổi.');
-      return post;
+      if (!this.graphql.template(ownerId, 'recentFeed')) await this.#ensureSession(ownerId);
+      const context = await this.#context(ownerId);
+      const referer = 'https://www.facebook.com/?filter=groups&sk=h_chr';
+      const { posts } = await paginateFeed(async cursor => {
+        const text = await this.graphql.fetchQuery(context.request, ownerId, 'recentFeed', { cursor, count: 10, referer });
+        return { posts: parseGraphQLStream(text), ...extractPageInfo(text) };
+      }, { cutoff: watermark, maxPages: watermark === null ? 1 : maxPages, latest: true, stopAfterOld: 1 });
+      return posts.filter(post => post.publishedAt && /\/groups\/[^/]+\/posts\//.test(post.url));
+    });
+  }
+
+  notificationGroups(ownerId, { maxPages = 1, isKnown = () => false } = {}) {
+    if (this.scanMode !== 'api') return Promise.resolve([]);
+    return this.#enqueue(ownerId, async () => {
+      if (!this.graphql.template(ownerId, 'notifications')) await this.#ensureSession(ownerId);
+      const context = await this.#context(ownerId);
+      const hints = [];
+      let cursor = null;
+      for (let page = 0; page < maxPages; page++) {
+        const text = await this.graphql.fetchQuery(context.request, ownerId, 'notifications',
+          {cursor,count:15,referer:'https://www.facebook.com/notifications/'});
+        const list = notificationHints(text);
+        hints.push(...list);
+        const { endCursor, hasNextPage } = extractPageInfo(text);
+        // Notifications are newest-first: reaching an already seen one means the rest were read last poll.
+        if (!hasNextPage || list.some(isKnown)) break;
+        cursor = endCursor;
+      }
+      return hints;
     }, false, true);
+  }
+
+  // Logged at most every 10 minutes per account and query kind.
+  #apiFallback(key, ownerId, error) {
+    if (this.browserless) throw error;
+    if (Date.now() - (this.#fallbackLogs.get(key) || 0) < 600000) return;
+    this.#fallbackLogs.set(key, Date.now());
+    this.log(`[QUÉT API | Tài khoản ${ownerId}] ${error.message} Dùng trình duyệt cho lượt này và lấy lại template.`);
+  }
+
+  #rememberTemplate(ownerId, template, scope) {
+    if (this.graphql.remember(ownerId, template, scope)) this.log(`[QUÉT API | Tài khoản ${ownerId}] Đã lấy template GraphQL ${template.friendlyName}.`);
+  }
+
+  // Names the paginated GraphQL queries a capture visit saw without matching, so patterns can follow Facebook renames.
+  #logUnmatched(ownerId, kind, seen) {
+    const key = `${ownerId}\n${kind}`;
+    if (Date.now() - (this.#unmatchedLogs.get(key) || 0) < 1800000) return;
+    this.#unmatchedLogs.set(key, Date.now());
+    this.log(`[QUÉT API | Tài khoản ${ownerId}] Chưa nhận ra truy vấn GraphQL "${kind}"; đã thấy: ${[...seen].map(([name, keys]) => `${name} {${keys.join(',')}}`).join('; ')}`);
+  }
+
+  joinedGroups(ownerId, options = {}) {
+    if (options.force) {
+      this.cooldown.save(ownerId, null);
+    }
+    const target = 'https://www.facebook.com/groups/joins/';
+    return this.#enqueue(ownerId, async () => {
+      if (this.scanMode === 'api' && !this.graphql.template(ownerId, 'joinedGroups')) await this.#ensureSession(ownerId);
+      const template = this.scanMode === 'api' && this.graphql.template(ownerId, 'joinedGroups');
+      if (template) {
+        try {
+          const context = await this.#context(ownerId);
+          const result = await readJoinedGroupsApi(cursor => this.graphql.fetchQuery(context.request, ownerId, 'joinedGroups', { cursor, referer: target }), { baseline: template.baseline });
+          template.baseline = result.groups.length;
+          return result;
+        } catch (error) {
+          if (error.code !== 'GRAPHQL_SCHEMA') throw error;
+          this.graphql.invalidate(ownerId, 'joinedGroups');
+          this.#apiFallback(`${ownerId}\njoinedGroups`, ownerId, error);
+        }
+      }
+      let captured = null;
+      const result = await this.#read(ownerId,target,null,null,null,readJoinedGroups,
+        this.scanMode === 'api' ? { captureTemplate: 'joinedGroups', onTemplate: value => { captured = value; } } : {});
+      if (captured) this.#rememberTemplate(ownerId, { ...captured, baseline: result.groups.length }, 'joinedGroups');
+      return result;
+    });
+  }
+
+  clearCooldown(ownerId) {
+    this.cooldown.save(ownerId, null);
   }
 
   #readProfilePost(ownerId, post) {
@@ -346,7 +568,7 @@ export class FacebookCollector {
 
   #profileSnapshot(snapshot, link) {
     return {id:link.id,url:link.url,kind:link.kind,text:String(snapshot.text || '').trim().slice(0,30000),
-      author:snapshot.author || null,authorUrl:normalizeAuthorUrl(snapshot.authorUrl),media:normalizeMedia(snapshot.media),
+      author:snapshot.author || null,authorUrl:isAnonymousAuthor(snapshot.author) ? null : normalizeAuthorUrl(snapshot.authorUrl),media:normalizeMedia(snapshot.media),
       publishedAt:[snapshot.publishedAt,...(snapshot.dateLabels || [])].map(parsePublishedAt).find(Boolean) || null};
   }
 
@@ -356,13 +578,22 @@ export class FacebookCollector {
     const targets = mode === 'posts' ? [profile] : mode === 'reels' ? [profileReelsUrl(profile)] : [profile,profileReelsUrl(profile)];
     for (const target of targets) {
       if (options.shouldContinue && !options.shouldContinue()) break;
-      await this.#read(ownerId,target,null,null,null,async page => {
+      const kind = target === profile ? 'profile' : 'reels', scope = `${kind}:${profile}`;
+      if (this.scanMode === 'api' && await this.#collectProfileApi(ownerId, profile, target, kind, dateRange, options, posts)) continue;
+      // As with groups, a missed capture is retried at most every 30 minutes so scans do not keep paying extra scrolls.
+      const capture = this.scanMode === 'api' && Date.now() - (this.#captureMisses.get(`${ownerId}\n${scope}`) || 0) >= 1800000;
+      let template = null, seenAliases = [], profileName = '';
+      await this.#read(ownerId,target,null,null,null,async (page, captured) => {
         const aliases = new Set([profile, normalizeProfileUrl(page.url())]);
         const canonical = await page.locator('head link[rel="canonical"], head meta[property="og:url"]').evaluateAll(nodes => nodes.map(node => node.getAttribute('href') || node.getAttribute('content')));
         for (const value of canonical) { try { aliases.add(normalizeProfileUrl(value)); } catch {} }
         const belongs = value => { try { return aliases.has(normalizeProfileUrl(value)); } catch { return false; } };
         const name = await page.locator('h1').first().innerText().catch(() => '');
-        const passes = options.latest ? 1 : dateRange ? 300 : this.scrollPasses;
+        seenAliases = [...aliases];
+        profileName = name.trim().slice(0,300);
+        const basePasses = options.latest ? 1 : (dateRange && options.backfill ? 300 : this.scrollPasses);
+        // The pagination query is only sent after scrolling; allow a few extra passes to capture it.
+        const passes = capture ? Math.max(basePasses, 4) : basePasses;
         let stagnant = 0;
         for (let pass=0; pass<passes; pass++) {
           if (options.shouldContinue && !options.shouldContinue()) break;
@@ -395,32 +626,207 @@ export class FacebookCollector {
           stagnant = posts.size === before ? stagnant+1 : 0;
           if (options.onPosts) await options.onPosts([...posts.values()].filter(post => post.publishedAt));
           if (stagnant >= 5) break;
+          if (pass+1 >= basePasses && (!capture || captured())) break;
           if (pass+1<passes) {
             await page.evaluate(() => window.scrollBy(0,Math.max(window.innerHeight*.9,600)));
             await page.waitForTimeout(1200);
           }
         }
-      });
+      }, capture ? { captureTemplate: kind, onTemplate: value => { template = value; } } : {});
+      if (template) {
+        // The numeric ID sent by the profile query is the alias API authors are reported under.
+        const aliases = [...seenAliases, ...(template.targetId ? [`https://www.facebook.com/profile.php?id=${template.targetId}`] : [])];
+        this.#rememberTemplate(ownerId, { ...template, aliases, name: profileName }, scope);
+      } else if (capture) this.#captureMisses.set(`${ownerId}\n${scope}`, Date.now());
     }
     if (!posts.size) throw new Error('Không đọc được bài/reel thuộc trang cá nhân này. Kiểm tra quyền xem hoặc giao diện Facebook.');
     return [...posts.values()];
+  }
+
+  // Profile posts/reels through a captured timeline or reels query; false means use the browser this run.
+  async #collectProfileApi(ownerId, profile, target, kind, dateRange, options, posts) {
+    const scope = `${kind}:${profile}`, template = this.graphql.template(ownerId, scope);
+    if (!template) return false;
+    const aliases = new Set([profile, ...['profile', 'reels'].flatMap(item => this.graphql.template(ownerId, `${item}:${profile}`)?.aliases || [])]);
+    const belongs = value => { try { return aliases.has(normalizeProfileUrl(value)); } catch { return false; } };
+    try {
+      const context = await this.#context(ownerId);
+      const { posts: found } = await paginateFeed(async (cursor, pages) => {
+        const text = await this.graphql.fetchQuery(context.request, ownerId, scope, { cursor, referer: target });
+        const page = extractProfileGraphQLPosts(text, kind, belongs).map(post => ({ ...post, groupName: template.name || '' }));
+        if (!pages && !page.length) throw schemaError('Trang GraphQL đầu tiên không có bài/reel nào thuộc trang cá nhân.');
+        return { posts: page, ...extractPageInfo(text) };
+      }, this.#pageOptions(dateRange, options));
+      for (const post of found) posts.set(post.id, post);
+      return true;
+    } catch (error) {
+      if (error.code !== 'GRAPHQL_SCHEMA') throw error;
+      this.graphql.invalidate(ownerId, scope);
+      this.#apiFallback(`${ownerId}\n${scope}`, ownerId, error);
+      return false;
+    }
+  }
+
+  // Defaults read at most 10 pages; bulk blocking passes a higher cap and partial=false.
+  collectCommentContacts(ownerId, postUrl, { passes = 10, partial = true, low = false, canContinue: keepReading = () => true, resume = null, onProgress = null } = {}) {
+    const post = normalizePostUrl(postUrl);
+    if (!post) return Promise.reject(new Error('Cần link bài viết gốc hoặc video Facebook dạng /TEN/videos/ID; quảng cáo dùng link bài viết gốc.'));
+    return this.#enqueue(ownerId, async queueContinue => {
+      const canContinue = () => queueContinue() && keepReading();
+      // The comments query is keyed by feedback ID = base64("feedback:" + numeric post ID).
+      const numeric = this.scanMode === 'api' && /^\d+$/.test(post.id);
+      if (numeric && this.browserless && !this.graphql.template(ownerId, 'comments')) await this.#ensureSession(ownerId);
+      const template = numeric && this.graphql.template(ownerId, 'comments');
+      if (template) {
+        try {
+          const context = await this.#context(ownerId);
+          const result = await readCommentContactsApi(cursor => this.graphql.fetchQuery(context.request, ownerId, 'comments', { cursor, targetId: post.id, referer: post.url, low }),
+            post, { canContinue, passes, partial, before: /before/i.test(template.cursorKey), singlePage: !template.cursorKey, resume: template.cursorKey ? resume : null, onProgress });
+          // Bulk scans also expand unread replies in the browser when the API result is incomplete.
+          if (result.complete !== false || this.browserless || (partial && template.cursorKey)) return result;
+        } catch (error) {
+          if (error.code !== 'GRAPHQL_SCHEMA') throw error;
+          // HTTP-only cannot tell a post without readable comments from a stale query, and parking the
+          // built-in would fail every post of the account for parkMs with no browser to recapture it.
+          if (this.browserless && error.emptyComments) throw Object.assign(new Error('Không đọc được comment của bài này. Hãy mở phần bình luận, kiểm tra quyền xem và dùng link bài/video gốc.'), { code: 'NO_COMMENTS' });
+          this.graphql.invalidate(ownerId, 'comments');
+          this.#apiFallback(`${ownerId}\ncomments`, ownerId, error);
+        }
+      }
+      let captured = null;
+      const result = await this.#read(ownerId, post.url, post.groupUrl, post.id, null, async page => {
+        if (normalizePostUrl(page.url())?.url !== post.url) throw new Error('Facebook chuyển sang bài khác; dừng thu thập comment.');
+        await page.locator('[role="article"] a[href*="comment_id="]').first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+        return readCommentContacts(page, post, { canContinue, passes });
+      }, this.scanMode === 'api' ? { captureTemplate: 'comments', onTemplate: value => { captured = value; } } : {});
+      if (captured) this.#rememberTemplate(ownerId, captured, 'comments');
+      return result;
+    }, false, low);
   }
 
   comment(ownerId, postUrl, text, canSubmit) {
     const post = normalizePostUrl(postUrl);
     if (!post) return Promise.reject(new Error('Link bài Facebook không hợp lệ.'));
     const body = commentText(text);
-    return this.#enqueue(ownerId, canContinue => this.#read(ownerId,post.url,post.groupUrl,post.id,null,
+    if (this.browserless) return this.#httpAction(ownerId, 'comment', post.id, body, canSubmit);
+    return this.#action(started => this.#enqueue(ownerId, canContinue => this.#read(ownerId,post.url,post.groupUrl,post.id,null,
       async page => {
         const actual = normalizePostUrl(page.url());
         if (!actual || actual.url !== post.url) throw new Error('Facebook chuyển sang bài khác; không đăng bình luận.');
-        await revealPermalinks(page);
+        started();
         return submitComment(page,post,body,() => canContinue() && (!canSubmit || canSubmit()));
-      }),true);
+      }),true));
+  }
+
+  directMessage(ownerId, authorUrl, text, canSubmit, options = { callAfter: true }) {
+    const norm = normalizeAuthorUrl(authorUrl);
+    if (!norm) return Promise.reject(new Error('Link trang cá nhân của tác giả không hợp lệ hoặc bài viết ẩn danh.'));
+    const body = directMessageText(text);
+    if (this.browserless) return this.#httpAction(ownerId, 'message', this.#recipientId(norm), body, canSubmit);
+    return this.#action(started => this.#enqueue(ownerId, canContinue => this.#read(ownerId,norm,null,null,null,
+      async page => {
+        started();
+        return sendDirectMessage(page,norm,body,() => canContinue() && (!canSubmit || canSubmit()), options);
+      }, options),true));
+  }
+
+  // `low` (bulk jobs): background queue and low limiter priority so scanning is never held up.
+  blockUser(ownerId, authorUrl, canSubmit, { low = false } = {}) {
+    const norm = normalizeAuthorUrl(authorUrl);
+    if (!norm) return Promise.reject(new Error('Không xác định được trang cá nhân người đăng.'));
+    return this.#httpAction(ownerId, 'block', this.#recipientId(norm), null, canSubmit, low);
+  }
+
+  // Numeric ID of the logged-in Facebook account (null when no session is known), so bulk actions skip it.
+  accountId(ownerId, { low = false } = {}) {
+    return this.#enqueue(ownerId, async () => { await this.#ensureSession(ownerId); return this.graphql.session(ownerId)?.form.__user || null; }, !low, low);
+  }
+
+  // Vanity-only profiles need their numeric ID for the block mutation: one plain GET (no browser render),
+  // accepting only IDs bound to that vanity. 429/checkpoint stop the caller like any rate limit.
+  resolveProfileId(ownerId, authorUrl, { low = false } = {}) {
+    const norm = normalizeAuthorUrl(authorUrl), known = norm?.match(/[?&]id=(\d+)$/)?.[1];
+    if (!norm || known) return Promise.resolve(known || null);
+    return this.#enqueue(ownerId, async () => {
+      const context = await this.#context(ownerId);
+      const page = await this.graphql.limiter.run(ownerId, async () => {
+        const response = await context.request.get(norm, { maxRedirects: 0, timeout: 30000, failOnStatusCode: false });
+        const location = response.headers().location || '';
+        if (response.status() === 429 || /checkpoint/i.test(location)) throw rateLimitError();
+        return { location, html: response.status() === 200 ? await response.text() : '' };
+      }, low ? { low } : undefined);
+      return profileIdFromHtml({ ...page, vanity: new URL(norm).pathname.replace(/\//g, ''), ownId: this.graphql.session(ownerId)?.form.__user });
+    }, !low, low);
+  }
+
+  friendRequest(ownerId, authorUrl, canSubmit) {
+    const norm = normalizeAuthorUrl(authorUrl);
+    if (!norm) return Promise.reject(new Error('Link trang cá nhân của tác giả không hợp lệ hoặc bài viết ẩn danh.'));
+    if (this.browserless) return this.#httpAction(ownerId, 'friend', this.#recipientId(norm), null, canSubmit);
+    return this.#action(started => this.#enqueue(ownerId, canContinue => this.#read(ownerId,norm,null,null,null,
+      async page => {
+        started();
+        return sendFriendRequest(page,norm,() => canContinue() && (!canSubmit || canSubmit()));
+      }),true));
+  }
+
+  // Navigation, login and queue errors happen before the send helper runs, so nothing can have been sent;
+  // the helpers themselves tag their own errors (commentSubmitted true/false).
+  async #action(work) {
+    let started = false;
+    try { return await work(() => { started = true; }); }
+    catch (error) {
+      if (!started && error && typeof error === 'object') error.commentSubmitted ??= false;
+      throw error;
+    }
+  }
+
+  #recipientId(url) {
+    const parsed = new URL(url);
+    return parsed.searchParams.get('id') || parsed.pathname.match(/^\/(\d+)\/?$/)?.[1] || null;
+  }
+
+  #httpAction(ownerId, kind, target, text, canSubmit, low = false) {
+    return this.#action(started => this.#enqueue(ownerId, async canContinue => {
+      if (!target) throw new Error('HTTP-only cần link profile.php?id=ID_SO của người nhận.');
+      await this.#ensureSession(ownerId);
+      const context = await this.#context(ownerId);
+      return this.graphql.limiter.run(ownerId, () => { started(); return submitHttpAction({ request: context.request,
+        session: this.graphql.session(ownerId), kind, target, text,
+        canSubmit: () => canContinue() && (!canSubmit || canSubmit()) }); }, low ? { low } : { priority: true });
+    }, !low, low));
+  }
+
+  async validateSessions(ownerIds) {
+    if (this.browserless) await Promise.all(ownerIds.map(ownerId => loadHttpSession(this.dataDir, ownerId)));
   }
 
   canScan(ownerId, probe = true) {
     return this.cooldown.canRun(ownerId, probe);
+  }
+
+  async recycle(ownerId = null) {
+    if (this.#closed) return;
+    const ids = ownerId ? [ownerId] : [...this.#profiles.keys()];
+    for (const id of ids) {
+      this.#readCounts.delete(id);
+      const opening = this.#profiles.get(id);
+      if (opening) {
+        try {
+          const context = await opening;
+          if (typeof context.pages === 'function' && context.pages().length === 0) {
+            this.#profiles.delete(id);
+            this.#contexts.delete(context);
+            await context.close().catch(() => {});
+          }
+        } catch {
+          this.#profiles.delete(id);
+        }
+      }
+    }
+    if (typeof global.gc === 'function') {
+      try { global.gc(); } catch {}
+    }
   }
 
   #enqueue(ownerId, work, priority = false, background = false, probe = false) {
@@ -442,6 +848,12 @@ export class FacebookCollector {
   }
 
   async #openContext(ownerId) {
+    if (this.browserless) {
+      const context = await openHttpContext(this.dataDir, ownerId, { log: this.apiLog ? this.log : null });
+      if (this.#closed) { await context.close(); throw new Error('Facebook collector đã đóng.'); }
+      this.#contexts.add(context);
+      return context;
+    }
     const profile = profileDirectory(this.dataDir, ownerId);
     await mkdir(profile, { recursive: true, mode: 0o700 });
     const { chromium } = await import('playwright');
@@ -451,7 +863,14 @@ export class FacebookCollector {
         headless: this.headless, locale: 'vi-VN', timezoneId: 'Asia/Ho_Chi_Minh', viewport: { width: 1280, height: 1000 },
         serviceWorkers: 'block', acceptDownloads: false,
         timeout: 30000,
+        args: [
+          '--use-fake-ui-for-media-stream',
+          '--use-fake-device-for-media-stream',
+          '--disk-cache-size=33554432',
+          '--media-cache-size=1',
+        ],
       });
+      await context.grantPermissions(['microphone'], { origin: 'https://www.facebook.com' }).catch(() => {});
     } catch {
       throw new Error('Không mở được Chromium/profile Facebook. Chạy npx playwright install chromium; đóng cửa sổ login và mọi bot đang dùng cùng profile rồi thử lại.');
     }
@@ -480,9 +899,67 @@ export class FacebookCollector {
   }
 
   async #read(ownerId, target, groupUrl, postId = null, dateRange = null, action = null, options = {}) {
+    if (this.browserless) throw browserUnavailable();
     const context = await this.#context(ownerId);
     const page = await context.newPage();
-    page.on('popup', popup => popup.close().catch(() => {}));
+    page.on('popup', async popup => {
+      if (options?.callAfter) {
+        // missedCall closes the call window itself; this only catches strays without cutting the ring short.
+        await new Promise(r => setTimeout(r, 15000));
+        await popup.close().catch(() => {});
+      } else {
+        popup.close().catch(() => {});
+      }
+    });
+
+    const apiPosts = new Map();
+    let pageClosed = false;
+    let captured = null;
+    const captureKind = options.captureTemplate === true ? 'feed' : options.captureTemplate || null;
+    const unmatched = new Map();
+    // Any GraphQL call the page makes on its own carries the session tokens; keep them for the API lane.
+    if (this.scanMode === 'api' && this.apiBootstrap && !this.graphql.session(ownerId)) {
+      page.on('request', request => {
+        if (pageClosed || this.graphql.session(ownerId)) return;
+        this.#rememberSession(ownerId, captureSession({ method: request.method(), url: request.url(), postData: request.postData(), headers: request.headers() }), 'trình duyệt');
+      });
+    }
+    if (captureKind) {
+      page.on('request', request => {
+        if (pageClosed || (captured && captureKind === 'feed')) return;
+        const raw = { method: request.method(), url: request.url(), postData: request.postData(), headers: request.headers() };
+        const template = captureKind === 'feed' ? captureFeedTemplate(raw) : captureQueryTemplate(captureKind, raw);
+        if (!template) {
+          const seen = !captured && unmatched.size < 30 && describeGraphQLRequest(raw);
+          if (seen && seen.keys.some(key => /cursor|after|before|count|first|last/i.test(key))) unmatched.set(`${seen.friendlyName}#${seen.docId}`, seen.keys);
+          return;
+        }
+        // Non-feed kinds keep the best-ranked query of the visit; the feed keeps the first match.
+        if (captured && !(template.priority < captured.priority)) return;
+        captured = template;
+        if (captureKind !== 'feed') {
+          options.onTemplate?.(template);
+          return;
+        }
+        this.#captureMisses.delete(ownerId);
+        if (this.graphql.remember(ownerId, template)) this.log(`[QUÉT API | Tài khoản ${ownerId}] Đã lấy template GraphQL ${template.friendlyName}.`);
+        try { options.onGroupId?.(template.groupId); } catch { /* Persisting the alias is best effort. */ }
+      });
+    }
+    page.on('response', async res => {
+      if (pageClosed) return;
+      const u = res.url();
+      if (u.includes('/api/graphql/')) {
+        try {
+          const text = await res.text();
+          if (pageClosed) return;
+          for (const post of parseGraphQLStream(text, groupUrl)) {
+            apiPosts.set(post.id, post);
+          }
+        } catch {}
+      }
+    });
+
     let stage = 'mở trang Facebook';
     try {
       page.setDefaultTimeout(8000);
@@ -491,11 +968,15 @@ export class FacebookCollector {
       stage = 'kiểm tra phiên đăng nhập và quyền đọc';
       await assertReadable(page, context);
       if (action === readJoinedGroups) return await action(page);
-      await page.locator('a[href*="/posts/"], a[href*="/permalink/"], a[href*="/reel/"], [role="main"]').first().waitFor({ state: 'visible', timeout: 12000 }).catch(() => {});
-      if (action) return await action(page);
+      if (!apiPosts.size && !action) {
+        await page.locator('a[href*="/posts/"], a[href*="/permalink/"], a[href*="/reel/"], [role="main"]').first().waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
+      }
+      if (action) return await action(page, () => captured);
       const groupName = !postId ? await page.locator('h1').first().innerText().catch(() => '') : '';
       const collected = new Map();
-      const passes = postId || options.latest ? 1 : dateRange ? 300 : this.scrollPasses;
+      const basePasses = postId || options.latest ? 1 : (dateRange && options.backfill ? 300 : this.scrollPasses);
+      // Facebook only sends the feed pagination query after scrolling; allow a few extra passes to capture it.
+      const passes = options.captureTemplate ? Math.max(basePasses, 4) : basePasses;
       const emitted = new Map();
       let stagnant = 0;
       let completedPasses = 0, snapshotCount = 0;
@@ -504,14 +985,7 @@ export class FacebookCollector {
         if (options.shouldContinue && !options.shouldContinue()) break;
         completedPasses++;
         await assertReadable(page, context);
-        // Expand only message-local buttons. Never click a generic page button,
-        // which could post, join a group, or perform another account action.
-        const expand = page.locator('[data-ad-preview="message"], [data-ad-comet-preview="message"], [data-ad-rendering-role="story_message"]').getByRole('button', { name: /^(?:See more|Xem thêm)$/i });
-        const expandCount = Math.min(await expand.count(), 20);
-        for (let index = expandCount - 1; index >= 0; index--) {
-          const button = expand.nth(index);
-          if (await button.isVisible().catch(() => false)) await button.click({ timeout: 1000 }).catch(() => {});
-        }
+
         const currentUrl = new URL(page.url());
         const currentGroup = currentUrl.pathname.match(/^\/groups\/([A-Za-z0-9._-]+)/)?.[1];
         if (!currentGroup) throw new Error('Facebook không còn mở trang nhóm/bài mục tiêu. Kiểm tra phiên đăng nhập và quyền truy cập bằng trình duyệt.');
@@ -519,6 +993,7 @@ export class FacebookCollector {
         // A named group may publish numeric permalinks. Only trust aliases from
         // Facebook's own redirect/canonical metadata; never infer from shared links.
         const groupAliases = new Set([groupUrl, actualGroupUrl]);
+        for (const id of [options.numericId, captured?.groupId]) if (/^\d{5,25}$/.test(String(id || ''))) groupAliases.add(`https://www.facebook.com/groups/${id}`);
         const canonicalUrls = await page.locator('head link[rel="canonical"], head meta[property="og:url"]').evaluateAll(nodes => nodes.map(node => node.getAttribute('href') || node.getAttribute('content')));
         for (const url of canonicalUrls) {
           try { groupAliases.add(normalizeFacebookGroupUrl(url)); }
@@ -526,8 +1001,29 @@ export class FacebookCollector {
         }
         const previousSize = collected.size;
         const capture = async () => {
+          // 1. Trích xuất trực tiếp từ các script JSON và GraphQL stream của Facebook
+          const scripts = await page.evaluate(() => {
+            return [...document.querySelectorAll('script')]
+              .map(s => s.textContent || '')
+              .filter(t => t.length > 0 && t.length < 200000 && (t.includes('creation_time') || t.includes('post_id') || t.includes('legacy_fbid')))
+              .slice(0, 5);
+          }).catch(() => []);
+          for (const post of extractPostsFromPageScripts(scripts, groupUrl)) {
+            apiPosts.set(post.id, post);
+          }
+          for (const [id, post] of apiPosts) {
+            if (groupName.trim()) post.groupName = groupName.trim().slice(0, 300);
+            const previous = collected.get(id);
+            if (!previous || post.text.length >= previous.text.length) {
+              collected.set(id, { ...post, publishedAt: post.publishedAt || previous?.publishedAt || null });
+            } else if (!previous.publishedAt && post.publishedAt) {
+              previous.publishedAt = post.publishedAt;
+            }
+          }
+
+          // 2. Dự phòng qua DOM snapshot khi không có API payload (ví dụ trong mock test)
           const snapshots = await page.evaluate(extractVisiblePostSnapshots);
-          snapshotCount += snapshots.length;
+          snapshotCount += snapshots.length + apiPosts.size;
           for (const post of normalizeSnapshots(snapshots, [...groupAliases])) {
             if (groupName.trim()) post.groupName = groupName.trim().slice(0,300);
             const previous = collected.get(post.id);
@@ -543,24 +1039,35 @@ export class FacebookCollector {
           }
         };
         await capture();
-        await revealPermalinks(page,30,capture);
-        const timestampLinks = page.locator('a[href*="/posts/"], a[href*="/permalink/"]');
-        for (let index = 0, count = await timestampLinks.count(); index < count; index++) {
-          if (options.shouldContinue && !options.shouldContinue()) break;
-          const link = timestampLinks.nth(index);
-          if (await link.getAttribute('data-post-date')) continue;
-          const box = await link.boundingBox().catch(() => null);
-          if (!box || box.y < 0 || box.y + box.height > 1000) continue;
-          await revealPostDate(page,link);
-          await capture();
+        if (!apiPosts.size) {
+          // Expand message-local buttons only on DOM fallback
+          const expand = page.locator('[data-ad-preview="message"], [data-ad-comet-preview="message"], [data-ad-rendering-role="story_message"]').getByRole('button', { name: /^(?:See more|Xem thêm)$/i });
+          const expandCount = Math.min(await expand.count(), 10);
+          for (let index = expandCount - 1; index >= 0; index--) {
+            const button = expand.nth(index);
+            if (await button.isVisible().catch(() => false)) await button.click({ timeout: 500 }).catch(() => {});
+          }
+          await revealPermalinks(page,30,capture);
+          const timestampLinks = page.locator('a[href*="/posts/"], a[href*="/permalink/"]');
+          for (let index = 0, count = await timestampLinks.count(); index < count; index++) {
+            if (options.shouldContinue && !options.shouldContinue()) break;
+            const link = timestampLinks.nth(index);
+            if (await link.getAttribute('data-post-date')) continue;
+            const box = await link.boundingBox().catch(() => null);
+            if (!box || box.y < 0 || box.y + box.height > 1000) continue;
+            await revealPostDate(page,link);
+            await capture();
+          }
         }
         stagnant = collected.size === previousSize ? stagnant + 1 : 0;
         if (dateRange && stagnant >= 5) break;
+        if (pass + 1 >= basePasses && (captured || !options.captureTemplate)) break;
         if (pass + 1 < passes) {
           await page.evaluate(() => window.scrollBy(0, Math.max(window.innerHeight * 0.9, 600)));
-          await page.waitForTimeout(1200);
+          await page.waitForTimeout(400);
         }
       }
+      if (options.captureTemplate && !captured) this.#captureMisses.set(ownerId, Date.now());
       await assertReadable(page, context);
       if (!collected.size) throw emptyScanError(await page.evaluate(inspectScanPage), { passes: completedPasses, snapshots: snapshotCount });
       return [...collected.values()];
@@ -571,7 +1078,14 @@ export class FacebookCollector {
       }
       throw error;
     } finally {
+      pageClosed = true;
+      if (captureKind && !captured && unmatched.size) this.#logUnmatched(ownerId, captureKind, unmatched);
       await page.close().catch(() => {});
+      const count = (this.#readCounts.get(ownerId) || 0) + 1;
+      this.#readCounts.set(ownerId, count);
+      if (count >= 100) {
+        this.recycle(ownerId).catch(() => {});
+      }
     }
   }
 

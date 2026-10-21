@@ -37,9 +37,11 @@ cả thư mục khi chuyển máy, bao gồm runtime Node và trình duyệt đi
   dành cho tài khoản cục bộ mới, không tự chuyển dữ liệu của ID khác.
 - Shopee/TikTok phải gắn với cùng ID chủ sở hữu đang chọn. Đổi ID không chuyển
   quyền sở hữu link affiliate hoặc nguồn đã lưu.
-- Ứng dụng hoạt động cục bộ, không cần token Telegram để thao tác. Nó không
-  polling hay gửi tin Telegram; hàng đợi thông báo Telegram được giữ để bot xử
-  lý khi bạn chuyển lại sang bot.
+- Không có token Telegram: ứng dụng chạy cục bộ, không polling hay gửi tin;
+  hàng đợi thông báo được giữ để bot CLI xử lý sau. Có `TELEGRAM_BOT_TOKEN`:
+  khi bắt đầu vận hành, bot Telegram chạy cùng ứng dụng, dùng chung dữ liệu và
+  thông báo bài mới gửi về Telegram. Lỗi Telegram (token sai, 409) chỉ chuyển
+  sang chế độ cục bộ và báo ở Tổng quan.
 
 Chọn tài khoản chỉ đổi dữ liệu đang xem và tài khoản dùng cho thao tác trong
 giao diện. Nút bắt đầu hệ thống xử lý các nguồn không tạm dừng của **tất cả ID
@@ -141,9 +143,9 @@ affiliate. Các thao tác có tác động trực tiếp như `comment`, `remove
 | Điều hướng và hướng dẫn | `/menu`, `/sources`, `/settings ID`, `/help all`, `/cancel` |
 | Nguồn nhóm | `/add LINK1 LINK2`, `/joined refresh`, `/joined 2`, `/select 1,2`, `/select all` |
 | Trang cá nhân | `/profile LINK1 LINK2 all`, thay `all` bằng `posts` hoặc `reels` |
-| Nguồn và trạng thái | `/list`, `/status`, `/whoami`, `/pause ID`, `/resume ID`, `/remove ID` |
-| Từ khóa | `/keywords từ 1; từ 2`, `/groupkeywords ID từ 1; từ 2`, dùng `off` để nhận tất cả |
-| Khoảng ngày | `/daterange ID DD/MM/YYYY DD/MM/YYYY`, `/daterange ID off` |
+| Cấu hình và trạng thái | `/config [ID]`, `/list`, `/status`, `/whoami`, `/pause ID`, `/resume ID`, `/remove ID` |
+| Từ khóa nhận / chặn | `/keywords từ 1; từ 2` (nhận), `/reject từ 1; từ 2` (chặn), `/groupkeywords ID từ 1; từ 2`, `/groupreject ID từ 1; từ 2` |
+| Khoảng ngày | `/daterange ID DD/MM/YYYY DD/MM/YYYY`, `/daterange ID now`, `/daterange ID off` (mặc định khởi động từ hiện tại → tương lai) |
 | Bài đã lưu | `/posts ID 1`, `/posts all 1` |
 | Một nội dung | `/comment ID ID_bài \| nội dung`, `/comment ID all \| nội dung`, `/comment all \| nội dung` |
 | Danh sách bình luận | `/commentlist ID ID_bài \|` rồi mỗi dòng một nội dung/link |
@@ -161,21 +163,13 @@ dụng hoặc dán nội dung vào ô thêm nguồn; file cần mã hóa UTF-8.
 
 ## Đóng ứng dụng và sao lưu
 
-Khi Facebook trả HTTP 429 hoặc hiển thị thông báo giới hạn truy cập, bot tạm
-nghỉ tài khoản đó **6 giờ**. Trong thời gian này, quét thường, quét lịch sử,
-cập nhật bài, lấy danh sách nhóm và gửi bình luận đều chờ; tài khoản khác vẫn
-hoạt động. Lệnh quét lại không bỏ qua thời gian nghỉ. Bình luận chưa gửi được
-giữ trong hàng đợi.
-
-Sau 6 giờ, bot cho một lượt quét nguồn đang hoạt động thử lại. Quét thành công
-thì trở về lịch bình thường; nếu vẫn lỗi hoặc chưa xác nhận đọc được bài thì
-nghỉ thêm 6 giờ. Log ghi giờ thử tiếp theo theo giờ Việt Nam và thông báo khi
-khôi phục. Mốc chờ được lưu trong `data/facebook-cooldowns/`, nên khởi động lại
-bot không xóa thời gian nghỉ. Các yêu cầu đã gửi trước lúc phát hiện giới hạn
-có thể còn hoàn tất; tác vụ đang xếp hàng sẽ bị chặn trước khi mở trang.
+Khi Facebook trả HTTP 429 hoặc hiển thị thông báo giới hạn truy cập, bot không tạm
+nghỉ 6 giờ mà tự động gọi lại liên tục đến khi thành công. Quét thường, quét lịch sử,
+cập nhật bài, lấy danh sách nhóm và gửi bình luận/tin nhắn riêng sẽ tự động thử lại theo chu kỳ.
+Bình luận và tin nhắn riêng chưa gửi được vẫn được giữ trong hàng đợi ở trạng thái chờ để tiếp tục gửi.
 
 Dừng quét trước khi thay tài khoản hoặc cấu hình runtime. Chờ thao tác đang xử lý
-kết thúc rồi đóng ứng dụng. Nếu cần tiếp tục qua Telegram, đóng desktop và chạy
+kết thúc rồi đóng ứng dụng. Nếu cần chạy bot CLI riêng, đóng desktop và chạy
 lại bot với cùng thư mục dữ liệu và ID.
 
 Khi mọi tiến trình đã đóng, sao lưu `.env` và toàn bộ `data/` cùng nhau. Đây là

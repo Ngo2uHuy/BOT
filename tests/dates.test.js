@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDateRange, matchesDateRange, formatDateRange } from '../src/dates.js';
+import { parseDateRange, matchesDateRange, formatDateRange, isHistoricalDateRange } from '../src/dates.js';
 import { parsePublishedAt, normalizeAuthorUrl } from '../src/facebook.js';
 
 test('clock ranges use Vietnam time and include the final second', () => {
@@ -29,6 +29,13 @@ test('Vietnamese date ranges include full boundary days and reject unknown dates
   assert.equal(matches(null), false);
   assert.equal(parseDateRange('10/10/2025').end, null);
   assert.equal(parseDateRange('off'), null);
+  assert.equal(parseDateRange('now', 1000).start, 1000);
+  assert.equal(parseDateRange('now', 1000).end, null);
+  assert.equal(parseDateRange('hientai', 2000).start, 2000);
+  assert.equal(isHistoricalDateRange({ start: 1000000000, end: null }, 1000000000), false);
+  assert.equal(isHistoricalDateRange({ start: 1000000000 - 86400001, end: null }, 1000000000), false);
+  assert.equal(isHistoricalDateRange(null), false);
+  assert.equal(isHistoricalDateRange({ start: 1000000000, end: 1000001000 }, 1000000000), true);
   for (const value of ['31/2/2025', '29/2/2025', '10/10/2026 9/10/2026', '2025-10-10', '1/1/2025 extra extra']) assert.throws(() => parseDateRange(value));
   assert.ok(parseDateRange('29/2/2024'));
   assert.equal(matchesDateRange({ publishedAt: '2030-01-01T00:00:00Z' }, parseDateRange('10/10/2025'), Date.parse('2026-01-01T00:00:00Z')), false);

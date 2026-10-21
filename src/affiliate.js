@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { listPager } from './listing.js';
 
 const HOSTS = new Set(['shopee.vn','www.shopee.vn','m.shopee.vn','s.shopee.vn','shope.ee']);
 export const SHOPEE_API = 'https://open-api.affiliate.shopee.vn/graphql';
@@ -231,16 +232,15 @@ export function installAffiliateCommands(bot,store,affiliate=new ShopeeAffiliate
       await ctx.reply(`Đã tạo và lưu ${succeeded}/${urls.length} link. Xem /affiliatelinks. Để bình luận: /affiliatecomment ID_nguồn ID_bài | ID_link1,ID_link2`);
     } finally {active.delete(ctx.from.id);}
   });
-  bot.command('affiliatelinks',async ctx=>{
+  const pager=listPager(bot);
+  pager.define('affiliatelinks',(ctx,query)=>{
     const account=affiliate.accountKey(ctx.from.id);
-    if(!account) return info(ctx);
-    const raw=String(ctx.match || '1').trim();
-    if(!/^[1-9]\d{0,5}$/.test(raw)) return ctx.reply('Cú pháp: /affiliatelinks [trang].');
-    const page=Number(raw), links=store.listAffiliateLinks(ctx.from.id,account,(page-1)*10);
-    if(!links.length) return ctx.reply('Chưa có link ở trang này. Dùng /affiliate shopee LINK để tạo.');
-    for(const link of links) await ctx.reply(`#${link.id}\n${link.affiliate_url}`,{link_preview_options:{is_disabled:true}});
-    await ctx.reply(`Trang ${page}. Trang tiếp: /affiliatelinks ${page+1}\n/affiliatecomment ID_nguồn ID_bài | ID_link1,ID_link2`);
-  });
+    if(!account) return 'Chưa cấu hình Shopee Affiliate cho tài khoản Telegram này. Xem /affiliate status.';
+    const result=store.pageAffiliateLinks(ctx.from.id,account,query);
+    return {result,title:'🛍 Link Shopee đã tạo',empty:'Chưa có link. Dùng /affiliate shopee LINK để tạo.',remove:'links',lines:result.items.map(link=>`#${link.id} · ${link.affiliate_url}`),
+      footer:['/affiliatecomment ID_nguồn ID_bài | ID_link1,ID_link2']};
+  },'links');
+  bot.command('affiliatelinks',ctx=>affiliate.accountKey(ctx.from.id) ? pager.command(ctx,'affiliatelinks',ctx.match) : info(ctx));
   bot.command('affiliatecomment',async ctx=>{
     const match=String(ctx.match || '').match(/^\s*([1-9]\d*)\s+([A-Za-z0-9_-]+)\s*\|\s*([\d,\s]+)$/);
     if(!match || !Number.isSafeInteger(Number(match[1])) || match[2].toLowerCase()==='all') return ctx.reply('Cú pháp: /affiliatecomment ID_nguồn ID_bài | ID_link1,ID_link2\nLấy ID link từ /affiliatelinks; ID nguồn từ /list; ID bài từ /posts ID_nguồn.');

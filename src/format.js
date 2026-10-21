@@ -1,6 +1,7 @@
-import { normalizeSearchText } from "./input.js";
+import { matchesKeywords } from "./input.js";
 import { formatPublishedAt } from './dates.js';
 import { normalizeAuthorUrl } from './facebook.js';
+import { isAnonymousAuthor } from './direct-messages.js';
 
 export const TELEGRAM_MESSAGE_LIMIT = 4096;
 const SHORTENED = "\n… [Nội dung rút gọn — mở link để đọc tiếp]";
@@ -40,20 +41,26 @@ function postLink(post) {
   return value;
 }
 
+export function formatRejectedPost(group, post, result) {
+  const reason = result.matchedReject.length ? `Khớp Reject: ${singleLine(result.matchedReject.join('; '),220)}` : 'Không khớp từ khóa Accept nào';
+  return [`🚫 Bài bị loại theo từ khóa · Nhóm #${group.id} ${formatGroupTitle(group,post)}`, `Lý do: ${reason}`,
+    `Người đăng: ${post.author ? singleLine(post.author,100) : 'không rõ'} · Ngày đăng: ${formatPublishedAt(post.publishedAt)}`,
+    singleLine(post.text,300), post.url].filter(Boolean).join('\n');
+}
+
 /** Plain text only: HTML-like text in posts is displayed literally. */
 export function formatPost(group, post, keywords = []) {
   const link = postLink(post);
   const content = String(post.text ?? "").trim() || "[Không đọc được nội dung bài viết]";
   const matched = (keywords ?? []).filter((keyword) => {
-    const term = normalizeSearchText(keyword).trim();
-    return term && normalizeSearchText(content).includes(term);
+    return String(keyword ?? '').trim() && matchesKeywords(content, [keyword]);
   });
   const header = [
     `📌 ${formatGroupTitle(group,post)}`,
     `Nhóm #${group.id}${post.id ? ` · ID bài: ${singleLine(post.id,100)}` : ''}`,
     post.author ? `Người đăng: ${singleLine(post.author, 100)}` : null,
     `Ngày đăng: ${formatPublishedAt(post.publishedAt)}`,
-    `Trang cá nhân: ${normalizeAuthorUrl(post.authorUrl) || 'không rõ'}`,
+    `Trang cá nhân: ${(!isAnonymousAuthor(post.author) && normalizeAuthorUrl(post.authorUrl)) || 'không rõ'}`,
     matched.length ? `Từ khóa: ${singleLine(matched.join("; "), 220)}` : null,
   ].filter(Boolean).join("\n");
   const footer = [

@@ -1,0 +1,16 @@
+services:
+  bot:
+    build: .
+    container_name: fb_tele_bot
+    restart: always
+    init: true
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

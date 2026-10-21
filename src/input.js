@@ -54,11 +54,31 @@ export function normalizeSearchText(value) {
     .replace(/[đĐ]/g, "d").toLocaleLowerCase("vi");
 }
 
-/** An empty filter means all posts; otherwise any keyword can match. */
-export function matchesKeywords(text, keywords = []) {
-  const normalized = normalizeSearchText(text);
-  const terms = (keywords ?? []).map((value) => normalizeSearchText(value).trim()).filter(Boolean);
+// Preserve Vietnamese accents while treating composed/decomposed Unicode alike.
+const normalizeKeyword = value => String(value ?? '').normalize('NFC').toLocaleLowerCase('vi');
+
+/**
+ * An empty accept filter means all posts match; otherwise any accept keyword can match.
+ * If any reject keyword matches, the post is rejected immediately.
+ */
+export function matchesKeywords(text, keywords = [], rejectKeywords = []) {
+  const normalized = normalizeKeyword(text);
+  const rejectTerms = (rejectKeywords ?? []).map((value) => normalizeKeyword(value).trim()).filter(Boolean);
+  if (rejectTerms.length > 0 && rejectTerms.some((term) => normalized.includes(term))) {
+    return false;
+  }
+  const terms = (keywords ?? []).map((value) => normalizeKeyword(value).trim()).filter(Boolean);
   return terms.length === 0 || terms.some((term) => normalized.includes(term));
+}
+
+export function testKeywords(text, keywords = [], rejectKeywords = []) {
+  const normalized = normalizeKeyword(text);
+  const clean = values => (values ?? []).map(value => String(value ?? '').trim()).filter(Boolean);
+  const accept = clean(keywords), reject = clean(rejectKeywords);
+  const matchedAccept = accept.filter(term => normalized.includes(normalizeKeyword(term)));
+  const matchedReject = reject.filter(term => normalized.includes(normalizeKeyword(term)));
+  return { matchedAccept, matchedReject, acceptEmpty: !accept.length,
+    accepted: !matchedReject.length && (!accept.length || matchedAccept.length > 0) };
 }
 
 export function parseKeywords(text) {
@@ -66,7 +86,7 @@ export function parseKeywords(text) {
   if (!value || value.toLowerCase() === "off") return [];
   const seen = new Set();
   return value.split(/[;\n]+/).map((term) => term.trim()).filter((term) => {
-    const key = normalizeSearchText(term);
+    const key = normalizeKeyword(term);
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;

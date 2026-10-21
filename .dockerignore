@@ -1,0 +1,15 @@
+.git/
+node_modules/
+.env
+.env.*
+!.env.example
+data/
+*.sqlite*
+*.log
+test-results/
+playwright-report/
+dist/
+.desktop-build/
+.desktop-test/
+.electron-cache/
+.npm-cache/

@@ -10,7 +10,7 @@ app.setName('Affiliate Desk');
 app.setPath('userData',process.env.DESKTOP_USER_DATA || path.join(app.getPath('appData'),'AffiliateDesk'));
 const workspace=process.env.DESKTOP_WORKSPACE || (app.isPackaged?path.join(app.getPath('userData'),'workspace'):path.resolve(__dirname,'..'));
 const uiRoot=path.join(__dirname,'ui');
-const allowedMethods=new Set(['bootstrap','init','state','sources','posts','comments','links','command','callback','settings.get','settings.save','runtime.start','runtime.stop','login.open','login.finish','login.cancel']);
+const allowedMethods=new Set(['bootstrap','init','state','sources','posts','rejected','postCallback','retryBlocks','comments','links','command','callback','settings.get','settings.save','runtime.start','runtime.stop','login.open','login.finish','login.cancel','inboxes','friends','blocks','hot','health','joined','remove']);
 let win,child,closing=false,sequence=0;
 const pending=new Map();
 function event(value) {if(win && !win.isDestroyed()) win.webContents.send('desktop:event',value);}
@@ -26,7 +26,7 @@ function worker() {
   const env={...process.env,DESKTOP_WORKSPACE:workspace};
   delete env.ELECTRON_RUN_AS_NODE;
   if(app.isPackaged) env.PLAYWRIGHT_BROWSERS_PATH=path.join(process.resourcesPath,'browsers');
-  child=spawn(node,[path.join(backend,'desktop','service.js')],{cwd:workspace,env,windowsHide:true,stdio:['pipe','pipe','pipe']});
+  child=spawn(node,['--max-old-space-size=4096','--expose-gc',path.join(backend,'desktop','service.js')],{cwd:workspace,env,windowsHide:true,stdio:['pipe','pipe','pipe']});
   const lines=createInterface({input:child.stdout});
   lines.on('line',line=>{
     let reply;try{reply=JSON.parse(line);}catch{return;}
@@ -61,6 +61,7 @@ function trustedSender(e) {
 function externalUrl(value) {
   if(typeof value!=='string'||value.length>4000||/[\s\\\u0000-\u001f]/.test(value))throw new Error('Link không hợp lệ.');
   const url=new URL(value);
+  if(url.href==='https://chat.zalo.me/')return url.href;
   const hosts=['facebook.com','www.facebook.com','m.facebook.com','web.facebook.com','shopee.vn','www.shopee.vn','s.shopee.vn','shope.ee','tiktok.com','www.tiktok.com','shop.tiktok.com','vt.tiktok.com','vm.tiktok.com'];
   if(url.protocol!=='https:'||url.port||url.username||url.password||!hosts.includes(url.hostname))throw new Error('Chỉ mở link Facebook, Shopee hoặc TikTok hợp lệ.');
   return url.href;
